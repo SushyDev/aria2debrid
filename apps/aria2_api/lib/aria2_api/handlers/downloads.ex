@@ -411,7 +411,7 @@ defmodule Aria2Api.Handlers.Downloads do
       "connections" => "0",
       "numSeeders" => "0",
       "seeder" => "false",
-      "dir" => Aria2Debrid.Config.save_path(),
+      "dir" => torrent.save_path || Aria2Debrid.Config.save_path(),
       "files" => build_files(torrent),
       "bittorrent" => build_bittorrent_info(torrent),
       "infoHash" => String.upcase(torrent.hash)
