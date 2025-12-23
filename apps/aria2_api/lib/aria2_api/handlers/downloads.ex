@@ -473,18 +473,18 @@ defmodule Aria2Api.Handlers.Downloads do
     base_path = save_path || Aria2Debrid.Config.save_path()
 
     files
+    |> Enum.filter(fn file -> file["selected"] == 1 end)
     |> Enum.with_index(1)
     |> Enum.map(fn {file, index} ->
       path = file["path"] || ""
       size = file["bytes"] || 0
-      selected = file["selected"] == 1
 
       %{
         "index" => to_string(index),
         "path" => Path.join(base_path, path),
         "length" => to_string(size),
-        "completedLength" => if(selected, do: to_string(size), else: "0"),
-        "selected" => if(selected, do: "true", else: "false"),
+        "completedLength" => to_string(size),
+        "selected" => "true",
         "uris" => []
       }
     end)

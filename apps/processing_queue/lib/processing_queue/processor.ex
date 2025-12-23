@@ -457,7 +457,7 @@ defmodule ProcessingQueue.Processor do
   defp select_files(files) do
     video_extensions = Aria2Debrid.Config.streamable_extensions()
     additional_extensions = Aria2Debrid.Config.additional_selectable_files()
-    all_extensions = video_extensions ++ additional_extensions
+    min_file_size = Aria2Debrid.Config.min_file_size_bytes()
 
     if Aria2Debrid.Config.select_all?() do
       Enum.map(files, & &1["id"])
@@ -470,7 +470,12 @@ defmodule ProcessingQueue.Processor do
           |> String.trim_leading(".")
           |> String.downcase()
 
-        ext in all_extensions
+        file_size = file["bytes"] || 0
+
+        # Select video files that meet minimum size requirement
+        # Or select additional files without size requirement
+        (ext in video_extensions && file_size >= min_file_size) ||
+          ext in additional_extensions
       end)
       |> Enum.map(& &1["id"])
     end
