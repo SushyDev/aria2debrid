@@ -1,0 +1,110 @@
+defmodule ProcessingQueue.Cleanup do
+  @moduledoc """
+  Automatic cleanup of failed torrents after retention period.
+
+  This module periodically checks for failed torrents and removes them from the queue
+  after they've been in the failed state for the configured retention period (default: 5 minutes).
+
+  ## Why Automatic Cleanup is Needed
+
+  Sonarr's aria2 client implementation has a limitation:
+  - The `CanBeRemoved` flag is ONLY set to true for completed downloads (status="complete")
+  - Failed downloads (status="error") have `CanBeRemoved=false`
+  - Even with `RemoveFailedDownloads=true`, Sonarr will NOT remove failed aria2 downloads
+  - The `RemoveFailedDownloads` setting is effectively ignored for aria2!
+
+  Sonarr's Failed Download Handler:
+  1. Detects the failed download via aria2 status
+  2. Blocklists the release
+  3. Triggers a new search for alternatives
+  4. **Does NOT automatically remove the failed download from aria2** (due to CanBeRemoved limitation)
+
+  Without automatic cleanup, failed downloads would accumulate indefinitely in the
+  `aria2.tellStopped` results, cluttering the UI and consuming memory.
+
+  ## Timing Strategy
+
+  The 5-minute retention period ensures:
+  - Sonarr has time to detect the failure and run the Failed Download Handler
+  - The failed download remains visible in Sonarr's queue long enough for inspection
+  - Failed downloads don't accumulate indefinitely
+  - Real-Debrid resources are cleaned up promptly for failed downloads
+
+  ## Completed Downloads
+
+  Completed downloads (status="success") are NOT automatically cleaned up by this module:
+  - Sonarr WILL remove them via `aria2.removeDownloadResult` (if RemoveCompletedDownloads=true)
+  - Real-Debrid resources remain available until Sonarr explicitly removes them
+  - This allows Sonarr to control when completed downloads are cleaned up
+
+  ## Configuration
+
+  - `FAILED_RETENTION_MS` - Milliseconds to retain failed torrents (default: 300000 = 5 minutes)
+  - `CLEANUP_INTERVAL_MS` - Milliseconds between cleanup runs (default: 60000 = 1 minute)
+  """
+
+  use GenServer
+
+  alias ProcessingQueue.{Manager, Torrent}
+
+  require Logger
+
+  def start_link(opts \\ []) do
+    GenServer.start_link(__MODULE__, opts, name: __MODULE__)
+  end
+
+  @impl true
+  def init(_opts) do
+    interval_sec = Aria2Debrid.Config.cleanup_interval() / 1000
+    retention_sec = Aria2Debrid.Config.failed_retention() / 1000
+
+    Logger.info(
+      "Cleanup module started: checking every #{interval_sec}s, retaining failed torrents for #{retention_sec}s"
+    )
+
+    schedule_cleanup()
+    {:ok, %{}}
+  end
+
+  @impl true
+  def handle_info(:cleanup, state) do
+    cleanup_failed_torrents()
+    schedule_cleanup()
+    {:noreply, state}
+  end
+
+  defp schedule_cleanup do
+    interval = Aria2Debrid.Config.cleanup_interval()
+    Process.send_after(self(), :cleanup, interval)
+  end
+
+  defp cleanup_failed_torrents do
+    torrents = Manager.list_torrents()
+    failed_count = Enum.count(torrents, &(&1.state == :failed))
+
+    Logger.debug("Cleanup check: #{length(torrents)} total torrents, #{failed_count} failed")
+
+    to_cleanup =
+      torrents
+      |> Enum.filter(&Torrent.should_cleanup?/1)
+      |> Enum.map(& &1.hash)
+
+    if length(to_cleanup) > 0 do
+      Logger.info(
+        "Cleaning up #{length(to_cleanup)} failed torrents (#{length(to_cleanup)} eligible for cleanup out of #{failed_count} failed)"
+      )
+
+      Enum.each(to_cleanup, fn hash ->
+        Logger.debug("Cleanup: removing failed torrent #{hash}")
+      end)
+
+      Manager.cleanup_torrents(to_cleanup)
+    else
+      if failed_count > 0 do
+        Logger.debug(
+          "No failed torrents eligible for cleanup yet (#{failed_count} still within retention period)"
+        )
+      end
+    end
+  end
+end

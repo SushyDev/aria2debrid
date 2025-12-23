@@ -1,0 +1,39 @@
+# Git
+.git
+.gitignore
+
+# Build artifacts
+_build
+deps
+*.ez
+
+# Generated on crash by the VM
+erl_crash.dump
+
+# Static artifacts
+node_modules
+
+# IDE/Editor
+.elixir_ls
+.idea
+.vscode
+*.swp
+*.swo
+*~
+
+# Test artifacts
+cover
+
+# Documentation
+doc
+
+# Environment files
+.env
+.env.*
+
+# Go source code and other project symlinks (not needed in Docker)
+qdebrid/
+debrid_drive/
+
+# Architecture docs
+*.md

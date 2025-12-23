@@ -1,0 +1,79 @@
+# The directory Mix will write compiled artifacts to.
+/_build/
+
+# If you run "mix test --cover", coverage assets end up here.
+/cover/
+
+# The directory Mix downloads your dependencies sources to.
+/deps/
+
+# Where third-party dependencies like ExDoc output generated docs.
+/doc/
+
+# If the VM crashes, it generates a dump, let's ignore it too.
+erl_crash.dump
+
+# Also ignore archive artifacts (built via "mix archive.build").
+*.ez
+
+# Temporary files, for example, from tests.
+/tmp/
+
+# direnv environment variables
+.direnv/
+.envrc
+
+# Environment files
+.env
+.env.local
+
+# Database files
+*.db
+*.db-shm
+*.db-wal
+
+# Editor and IDE files
+.vscode/
+.idea/
+*.swp
+*.swo
+*~
+
+# OS files
+.DS_Store
+Thumbs.db
+
+# Logs
+*.log
+
+# Nix
+result
+result-*
+
+# Documentation markdown (temporary/working docs)
+/specs/
+
+# Ignore readonly reference code
+aria2_readonly_reference_code/
+sonarr_readonly_reference_code/
+reference/
+
+# Working/scratch files
+entrypoint.sh
+check_sonarr.exs
+debug_servarr.exs
+*.md
+!AGENTS.md
+
+# Symlinks to other projects
+debrid_drive
+qdebrid
+
+# Umbrella app specific - each app's build artifacts
+/apps/*/priv/static/
+/apps/*/_build/
+/apps/*/deps/
+/apps/*/cover/
+/apps/*/doc/
+/apps/*/tmp/
+/apps/*/*.ez
