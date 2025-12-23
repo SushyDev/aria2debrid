@@ -9,8 +9,6 @@ defmodule ProcessingQueue.Manager do
 
   require Logger
 
-  @gid_registry Aria2Api.GidRegistry
-
   @type state :: %{
           torrents: %{String.t() => Torrent.t()}
         }
@@ -345,10 +343,18 @@ defmodule ProcessingQueue.Manager do
   end
 
   defp unregister_gid(hash) do
-    @gid_registry.unregister(hash)
-  rescue
-    UndefinedFunctionError ->
+    # Try to call GidRegistry.unregister if the module is available
+    if Code.ensure_loaded?(Aria2Api.GidRegistry) do
+      try do
+        Aria2Api.GidRegistry.unregister(hash)
+      rescue
+        e in UndefinedFunctionError ->
+          Logger.debug("GidRegistry.unregister failed: #{inspect(e)}, skipping for #{hash}")
+          :ok
+      end
+    else
       Logger.debug("GidRegistry not available, skipping unregister for #{hash}")
       :ok
+    end
   end
 end

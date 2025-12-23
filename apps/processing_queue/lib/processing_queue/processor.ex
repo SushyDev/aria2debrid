@@ -260,65 +260,6 @@ defmodule ProcessingQueue.Processor do
     end
   end
 
-  defp do_select_files(torrent, client) do
-    files = torrent.files || []
-
-    Logger.debug(
-      "Found #{length(files)} files for #{torrent.hash}: #{inspect(Enum.map(files, & &1["path"]))}"
-    )
-
-    # Log file details for debugging
-    Enum.each(files, fn f ->
-      ext = Path.extname(f["path"]) |> String.trim_leading(".") |> String.downcase()
-      bytes = f["bytes"] || 0
-
-      Logger.debug(
-        "File check - path: #{f["path"]}, ext: #{ext}, bytes: #{bytes}, selected: #{f["selected"]}"
-      )
-    end)
-
-    Logger.debug(
-      "Config - streamable_extensions: #{inspect(Aria2Debrid.Config.streamable_extensions())}"
-    )
-
-    Logger.debug(
-      "Config - additional_selectable_files: #{inspect(Aria2Debrid.Config.additional_selectable_files())}"
-    )
-
-    Logger.debug("Config - min_file_size_bytes: #{Aria2Debrid.Config.min_file_size_bytes()}")
-    Logger.debug("Config - select_all?: #{Aria2Debrid.Config.select_all?()}")
-
-    # Select video files and configured additional files
-    selected_ids = select_files(files)
-
-    Logger.debug(
-      "Selected #{length(selected_ids)} file IDs for #{torrent.hash}: #{inspect(selected_ids)}"
-    )
-
-    if Enum.empty?(selected_ids) do
-      Logger.error(
-        "No valid files to select for #{torrent.hash}. Files: #{inspect(Enum.map(files, fn f -> "#{f["path"]} (#{f["bytes"]} bytes)" end))}"
-      )
-
-      {:error, "No valid files to select", Torrent.set_error(torrent, "No video files found")}
-    else
-      # Convert to comma-separated string for API
-      file_ids_string = Enum.join(selected_ids, ",")
-
-      case RealDebrid.Api.SelectFiles.select(client, torrent.rd_id, file_ids_string) do
-        :ok ->
-          # After selecting files, we need to re-fetch torrent info to get updated file status
-          # The torrent.files still has old selected values, refresh them
-          updated = %{torrent | selected_files: selected_ids}
-          {:ok, Torrent.transition(updated, :refreshing_info)}
-
-        {:error, reason} ->
-          {:error, "Failed to select files: #{inspect(reason)}",
-           Torrent.set_error(torrent, "File selection failed")}
-      end
-    end
-  end
-
   defp process_state(%Torrent{state: :refreshing_info} = torrent) do
     Logger.debug("Refreshing torrent info after file selection for #{torrent.hash}")
 
@@ -531,6 +472,68 @@ defmodule ProcessingQueue.Processor do
   defp process_state(%Torrent{state: terminal} = torrent) when terminal in [:success, :failed] do
     # Already in terminal state
     {:ok, torrent}
+  end
+
+  # Extracted file selection logic to avoid repeating the filtering and API call
+  # This helper is called from process_state(:selecting_files)
+  @doc false
+  defp do_select_files(torrent, client) do
+    files = torrent.files || []
+
+    Logger.debug(
+      "Found #{length(files)} files for #{torrent.hash}: #{inspect(Enum.map(files, & &1["path"]))}"
+    )
+
+    # Log file details for debugging
+    Enum.each(files, fn f ->
+      ext = Path.extname(f["path"]) |> String.trim_leading(".") |> String.downcase()
+      bytes = f["bytes"] || 0
+
+      Logger.debug(
+        "File check - path: #{f["path"]}, ext: #{ext}, bytes: #{bytes}, selected: #{f["selected"]}"
+      )
+    end)
+
+    Logger.debug(
+      "Config - streamable_extensions: #{inspect(Aria2Debrid.Config.streamable_extensions())}"
+    )
+
+    Logger.debug(
+      "Config - additional_selectable_files: #{inspect(Aria2Debrid.Config.additional_selectable_files())}"
+    )
+
+    Logger.debug("Config - min_file_size_bytes: #{Aria2Debrid.Config.min_file_size_bytes()}")
+    Logger.debug("Config - select_all?: #{Aria2Debrid.Config.select_all?()}")
+
+    # Select video files and configured additional files
+    selected_ids = select_files(files)
+
+    Logger.debug(
+      "Selected #{length(selected_ids)} file IDs for #{torrent.hash}: #{inspect(selected_ids)}"
+    )
+
+    if Enum.empty?(selected_ids) do
+      Logger.error(
+        "No valid files to select for #{torrent.hash}. Files: #{inspect(Enum.map(files, fn f -> "#{f["path"]} (#{f["bytes"]} bytes)" end))}"
+      )
+
+      {:error, "No valid files to select", Torrent.set_error(torrent, "No video files found")}
+    else
+      # Convert to comma-separated string for API
+      file_ids_string = Enum.join(selected_ids, ",")
+
+      case RealDebrid.Api.SelectFiles.select(client, torrent.rd_id, file_ids_string) do
+        :ok ->
+          # After selecting files, we need to re-fetch torrent info to get updated file status
+          # The torrent.files still has old selected values, refresh them
+          updated = %{torrent | selected_files: selected_ids}
+          {:ok, Torrent.transition(updated, :refreshing_info)}
+
+        {:error, reason} ->
+          {:error, "Failed to select files: #{inspect(reason)}",
+           Torrent.set_error(torrent, "File selection failed")}
+      end
+    end
   end
 
   # Helper functions
