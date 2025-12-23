@@ -490,6 +490,45 @@ defmodule Aria2Api.Handlers.Downloads do
     end)
   end
 
+  defp build_bittorrent_info(%Torrent{name: name, hash: hash, files: files, size: size}) do
+    # Build file list in torrent metainfo format
+    file_list =
+      if files && Enum.any?(files) do
+        files
+        |> Enum.map(fn file ->
+          %{
+            "length" => file["bytes"] || 0,
+            "path" => String.split(file["path"] || "", "/")
+          }
+        end)
+      else
+        []
+      end
+
+    info = %{
+      "name" => name || hash,
+      "pieceLength" => 16384
+    }
+
+    # Add files or length based on whether it's multi-file or single-file
+    info =
+      if Enum.empty?(file_list) do
+        # Single file torrent or no metadata yet
+        Map.put(info, "length", size || 0)
+      else
+        # Multi-file torrent
+        Map.put(info, "files", file_list)
+      end
+
+    %{
+      "announceList" => [],
+      "comment" => "",
+      "creationDate" => 0,
+      "mode" => if(Enum.empty?(file_list), do: "single", else: "multi"),
+      "info" => info
+    }
+  end
+
   defp build_bittorrent_info(%Torrent{name: name, hash: hash}) do
     %{
       "announceList" => [],
@@ -497,7 +536,9 @@ defmodule Aria2Api.Handlers.Downloads do
       "creationDate" => 0,
       "mode" => "multi",
       "info" => %{
-        "name" => name || hash
+        "name" => name || hash,
+        "pieceLength" => 16384,
+        "files" => []
       }
     }
   end

@@ -204,25 +204,31 @@ defmodule ProcessingQueue.Processor do
     client = get_rd_client()
     files = torrent.files || []
 
-    # Select video files and configured additional files
-    selected_ids = select_files(files)
-
-    if Enum.empty?(selected_ids) do
-      {:error, "No valid files to select", Torrent.set_error(torrent, "No video files found")}
+    # If files haven't been populated yet, wait for metadata to be available
+    if Enum.empty?(files) do
+      Logger.debug("Files not yet available for #{torrent.hash}, waiting for metadata")
+      {:wait, 2000, torrent}
     else
-      # Convert to comma-separated string for API
-      file_ids_string = Enum.join(selected_ids, ",")
+      # Select video files and configured additional files
+      selected_ids = select_files(files)
 
-      case RealDebrid.Api.SelectFiles.select(client, torrent.rd_id, file_ids_string) do
-        :ok ->
-          # After selecting files, we need to re-fetch torrent info to get updated file status
-          # The torrent.files still has old selected values, refresh them
-          updated = %{torrent | selected_files: selected_ids}
-          {:ok, Torrent.transition(updated, :refreshing_info)}
+      if Enum.empty?(selected_ids) do
+        {:error, "No valid files to select", Torrent.set_error(torrent, "No video files found")}
+      else
+        # Convert to comma-separated string for API
+        file_ids_string = Enum.join(selected_ids, ",")
 
-        {:error, reason} ->
-          {:error, "Failed to select files: #{inspect(reason)}",
-           Torrent.set_error(torrent, "File selection failed")}
+        case RealDebrid.Api.SelectFiles.select(client, torrent.rd_id, file_ids_string) do
+          :ok ->
+            # After selecting files, we need to re-fetch torrent info to get updated file status
+            # The torrent.files still has old selected values, refresh them
+            updated = %{torrent | selected_files: selected_ids}
+            {:ok, Torrent.transition(updated, :refreshing_info)}
+
+          {:error, reason} ->
+            {:error, "Failed to select files: #{inspect(reason)}",
+             Torrent.set_error(torrent, "File selection failed")}
+        end
       end
     end
   end
