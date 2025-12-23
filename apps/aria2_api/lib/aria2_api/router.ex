@@ -64,16 +64,27 @@ defmodule Aria2Api.Router do
     end
   end
 
-  get "/health" do
+  match "/health" do
     result = %{
       status: "healthy",
       version: "1.37.0",
       timestamp: DateTime.utc_now() |> DateTime.to_iso8601()
     }
 
-    conn
-    |> put_resp_content_type("application/json")
-    |> send_resp(200, Jason.encode!(result))
+    case conn.method do
+      "HEAD" ->
+        conn
+        |> put_resp_content_type("application/json")
+        |> send_resp(200, "")
+
+      "GET" ->
+        conn
+        |> put_resp_content_type("application/json")
+        |> send_resp(200, Jason.encode!(result))
+
+      _ ->
+        send_resp(conn, 405, "Method not allowed")
+    end
   end
 
   post "/rpc" do
