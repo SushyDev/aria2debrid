@@ -407,10 +407,9 @@ defmodule ProcessingQueue.Processor do
   defp process_state(%Torrent{state: :validating_media} = torrent) do
     Logger.debug("Validating media for torrent #{torrent.hash}")
 
-    # Build the save path based on hash (uppercase)
-    save_path = Path.join(Aria2Debrid.Config.save_path(), torrent.hash)
     # Reset retry_count for next phases
-    updated = %{torrent | save_path: save_path, retry_count: 0}
+    # save_path is already set in Torrent.new
+    updated = %{torrent | retry_count: 0}
 
     if Aria2Debrid.Config.media_validation_enabled?() do
       case validate_media_via_rd(updated) do

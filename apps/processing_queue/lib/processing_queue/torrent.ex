@@ -72,10 +72,13 @@ defmodule ProcessingQueue.Torrent do
   """
   @spec new(String.t(), String.t()) :: t()
   def new(hash, magnet) do
+    save_path = Path.join(Aria2Debrid.Config.save_path(), String.downcase(hash))
+
     %__MODULE__{
       hash: String.downcase(hash),
       magnet: magnet,
       state: :pending,
+      save_path: save_path,
       added_at: DateTime.utc_now()
     }
   end
