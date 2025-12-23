@@ -3,9 +3,8 @@ defmodule ProcessingQueue.Processor do
   Processes a single torrent through the state machine.
 
   State machine flow:
-  PENDING → ADDING_RD → WAITING_METADATA → SELECTING_FILES → REFRESHING_INFO →
-  FETCHING_QUEUE → VALIDATING_COUNT → VALIDATING_MEDIA → WAITING_DOWNLOAD → 
-  VALIDATING_PATH → SUCCESS/FAILED
+  PENDING → ADDING_RD → WAITING_METADATA → SELECTING_FILES → WAITING_DOWNLOAD →
+  VALIDATING_COUNT → VALIDATING_MEDIA → VALIDATING_PATH → SUCCESS/FAILED
   """
 
   use GenServer, restart: :temporary
@@ -312,11 +311,7 @@ defmodule ProcessingQueue.Processor do
               # Now fetch expected file count from Servarr queue
               case fetch_expected_files_from_servarr(torrent) do
                 {:ok, updated} ->
-                  {:ok, Torrent.transition(updated, :validating_count)}
-
-                {:error, reason} ->
-                  {:error, "Failed to fetch queue from Servarr: #{inspect(reason)}",
-                   Torrent.set_warning_error(torrent, inspect(reason))}
+                  {:ok, Torrent.transition(updated, :waiting_download)}
               end
 
             {:error, reason} ->
@@ -327,11 +322,7 @@ defmodule ProcessingQueue.Processor do
               # Try fetching queue anyway
               case fetch_expected_files_from_servarr(torrent) do
                 {:ok, updated} ->
-                  {:ok, Torrent.transition(updated, :validating_count)}
-
-                {:error, reason} ->
-                  {:error, "Failed to fetch queue from Servarr: #{inspect(reason)}",
-                   Torrent.set_warning_error(torrent, inspect(reason))}
+                  {:ok, Torrent.transition(updated, :waiting_download)}
               end
           end
       end
@@ -344,14 +335,13 @@ defmodule ProcessingQueue.Processor do
 
           case fetch_expected_files_from_servarr(torrent) do
             {:ok, updated} -> updated
-            {:error, _reason} -> torrent
           end
         else
           Logger.debug("No Servarr credentials available, skipping queue fetch")
           torrent
         end
 
-      {:ok, Torrent.transition(updated, :validating_count)}
+      {:ok, Torrent.transition(updated, :waiting_download)}
     end
   end
 
@@ -381,29 +371,6 @@ defmodule ProcessingQueue.Processor do
     end
   end
 
-  defp process_state(%Torrent{state: :validating_media} = torrent) do
-    Logger.debug("Validating media for torrent #{torrent.hash}")
-
-    # Build the save path based on hash (uppercase)
-    save_path = Path.join(Aria2Debrid.Config.save_path(), torrent.hash)
-    # Reset retry_count for next phases
-    updated = %{torrent | save_path: save_path, retry_count: 0}
-
-    if Aria2Debrid.Config.media_validation_enabled?() do
-      case validate_media_via_rd(updated) do
-        :ok ->
-          {:ok, Torrent.transition(updated, :waiting_download)}
-
-        {:error, reason} ->
-          # Media validation failures should trigger auto-redownload
-          notify_servarr_of_failure(updated, reason)
-          {:error, reason, Torrent.set_validation_error(updated, reason)}
-      end
-    else
-      {:ok, Torrent.transition(updated, :waiting_download)}
-    end
-  end
-
   defp process_state(%Torrent{state: :waiting_download} = torrent) do
     Logger.debug("Waiting for download completion on Real-Debrid for #{torrent.hash}")
 
@@ -415,7 +382,7 @@ defmodule ProcessingQueue.Processor do
           case info.status do
             "downloaded" ->
               Logger.info("Torrent #{torrent.hash} downloaded on Real-Debrid")
-              {:ok, Torrent.transition(torrent, :validating_path)}
+              {:ok, Torrent.transition(torrent, :validating_count)}
 
             other_status ->
               # require_downloaded? is true, so any non-downloaded status is a failure
@@ -432,8 +399,31 @@ defmodule ProcessingQueue.Processor do
           {:wait, 5000, torrent}
       end
     else
-      # Skip download verification, go straight to path validation
-      {:ok, Torrent.transition(torrent, :validating_path)}
+      # Skip download verification, go straight to file count validation
+      {:ok, Torrent.transition(torrent, :validating_count)}
+    end
+  end
+
+  defp process_state(%Torrent{state: :validating_media} = torrent) do
+    Logger.debug("Validating media for torrent #{torrent.hash}")
+
+    # Build the save path based on hash (uppercase)
+    save_path = Path.join(Aria2Debrid.Config.save_path(), torrent.hash)
+    # Reset retry_count for next phases
+    updated = %{torrent | save_path: save_path, retry_count: 0}
+
+    if Aria2Debrid.Config.media_validation_enabled?() do
+      case validate_media_via_rd(updated) do
+        :ok ->
+          {:ok, Torrent.transition(updated, :validating_path)}
+
+        {:error, reason} ->
+          # Media validation failures should trigger auto-redownload
+          notify_servarr_of_failure(updated, reason)
+          {:error, reason, Torrent.set_validation_error(updated, reason)}
+      end
+    else
+      {:ok, Torrent.transition(updated, :validating_path)}
     end
   end
 
@@ -677,22 +667,13 @@ defmodule ProcessingQueue.Processor do
 
     case ServarrClient.get_queue_items_by_download_id(client, torrent.hash) do
       {:ok, []} ->
-        # No queue items found
-        if Aria2Debrid.Config.validate_file_count?() do
-          # Validation is required - this is an error
-          Logger.warning(
-            "File count validation enabled but no queue items found for #{torrent.hash}"
-          )
+        # No queue items found - torrent may have been added manually or already imported
+        # Treat as warning (not error) so download can proceed
+        Logger.warning(
+          "No queue items found for #{torrent.hash} in Servarr - torrent may have been added manually or already imported"
+        )
 
-          {:error, "No queue items found in Servarr - torrent not in queue or already imported"}
-        else
-          # Validation is optional - just skip it
-          Logger.info(
-            "No queue items found for #{torrent.hash} in Servarr - skipping file count validation"
-          )
-
-          {:ok, torrent}
-        end
+        {:ok, torrent}
 
       {:ok, queue_items} ->
         # Count queue items to get expected file count (one per expected file)
@@ -703,20 +684,13 @@ defmodule ProcessingQueue.Processor do
         {:ok, %{torrent | expected_files: expected_count}}
 
       {:error, reason} ->
-        # Network/API errors
-        if Aria2Debrid.Config.validate_file_count?() do
-          # Validation is required - API errors are fatal
-          Logger.warning("Failed to query Servarr queue for #{torrent.hash}: #{inspect(reason)}")
+        # Network/API errors - can't validate file count
+        # But don't fail the download - just proceed without this validation
+        Logger.warning(
+          "Failed to query Servarr queue for #{torrent.hash}: #{inspect(reason)} - proceeding without file count validation"
+        )
 
-          {:error, "Failed to query Servarr queue: #{inspect(reason)}"}
-        else
-          # Validation is optional - continue without it
-          Logger.warning(
-            "Failed to query Servarr queue for #{torrent.hash}: #{inspect(reason)} - skipping validation"
-          )
-
-          {:ok, torrent}
-        end
+        {:ok, torrent}
     end
   end
 

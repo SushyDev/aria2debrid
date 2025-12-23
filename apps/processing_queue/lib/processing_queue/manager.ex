@@ -344,9 +344,12 @@ defmodule ProcessingQueue.Manager do
 
   defp unregister_gid(hash) do
     # Try to call GidRegistry.unregister if the module is available
-    if Code.ensure_loaded?(Aria2Api.GidRegistry) do
+    # Use dynamic module reference to avoid compile-time circular dependency warning
+    gid_registry_mod = :"Aria2Api.GidRegistry"
+
+    if Code.ensure_loaded?(gid_registry_mod) do
       try do
-        Aria2Api.GidRegistry.unregister(hash)
+        apply(gid_registry_mod, :unregister, [hash])
       rescue
         e in UndefinedFunctionError ->
           Logger.debug("GidRegistry.unregister failed: #{inspect(e)}, skipping for #{hash}")
