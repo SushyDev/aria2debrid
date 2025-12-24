@@ -312,6 +312,23 @@ defmodule ProcessingQueue.Processor do
               case fetch_expected_files_from_servarr(torrent) do
                 {:ok, updated} ->
                   {:ok, Torrent.transition(updated, :waiting_download)}
+
+                {:error, :queue_empty} ->
+                  # Queue is empty - this is a warning (may be timing issue)
+                  reason = "Queue empty in Servarr after refresh - cannot validate file count"
+
+                  {:error, reason,
+                   Torrent.set_warning_error(
+                     torrent,
+                     "Servarr queue empty - add may be delayed or manual"
+                   )}
+
+                {:error, reason} ->
+                  # API/network error fetching queue
+                  error_msg = "Failed to fetch Servarr queue: #{inspect(reason)}"
+
+                  {:error, error_msg,
+                   Torrent.set_warning_error(torrent, "Servarr API error: #{inspect(reason)}")}
               end
 
             {:error, reason} ->
@@ -323,18 +340,43 @@ defmodule ProcessingQueue.Processor do
               case fetch_expected_files_from_servarr(torrent) do
                 {:ok, updated} ->
                   {:ok, Torrent.transition(updated, :waiting_download)}
+
+                {:error, :queue_empty} ->
+                  reason = "Queue empty in Servarr - cannot validate file count"
+
+                  {:error, reason,
+                   Torrent.set_warning_error(
+                     torrent,
+                     "Servarr queue empty - add may be delayed or manual"
+                   )}
+
+                {:error, reason} ->
+                  error_msg = "Failed to fetch Servarr queue: #{inspect(reason)}"
+
+                  {:error, error_msg,
+                   Torrent.set_warning_error(torrent, "Servarr API error: #{inspect(reason)}")}
               end
           end
       end
     else
       # File count validation disabled - credentials are optional
+      # Still try to fetch expected_files if credentials are available (useful for logging)
       updated =
         if torrent.servarr_url && torrent.servarr_api_key do
           trigger_servarr_refresh(torrent)
           Process.sleep(2000)
 
           case fetch_expected_files_from_servarr(torrent) do
-            {:ok, updated} -> updated
+            {:ok, updated} ->
+              updated
+
+            {:error, _reason} ->
+              # Validation is disabled, so errors are not critical
+              Logger.debug(
+                "Could not fetch expected files for #{torrent.hash} (validation disabled, ignoring)"
+              )
+
+              torrent
           end
         else
           Logger.debug("No Servarr credentials available, skipping queue fetch")
@@ -349,22 +391,34 @@ defmodule ProcessingQueue.Processor do
     Logger.debug("Validating file count for torrent #{torrent.hash}")
 
     if Aria2Debrid.Config.validate_file_count?() do
-      expected = torrent.expected_files || 1
+      # If expected_files is nil, validation is REQUIRED but we couldn't determine the expected count
+      # This should fail validation rather than defaulting to 1
+      if is_nil(torrent.expected_files) do
+        reason =
+          "Cannot validate file count: expected_files not set (queue may be empty or credentials missing)"
 
-      video_files =
-        (torrent.files || [])
-        |> Enum.filter(fn f -> f["selected"] == 1 end)
-        |> Enum.filter(&video_file?/1)
-        |> length()
+        Logger.error("#{reason} for #{torrent.hash}")
 
-      if video_files >= expected do
-        {:ok, Torrent.transition(torrent, :validating_media)}
+        # This is a warning error (not validation) because it's a system/timing issue, not a content issue
+        {:error, reason, Torrent.set_warning_error(torrent, reason)}
       else
-        # File count mismatch triggers auto-redownload
-        reason = "File count mismatch: expected #{expected}, got #{video_files}"
-        notify_servarr_of_failure(torrent, reason)
+        expected = torrent.expected_files
 
-        {:error, reason, Torrent.set_validation_error(torrent, reason)}
+        video_files =
+          (torrent.files || [])
+          |> Enum.filter(fn f -> f["selected"] == 1 end)
+          |> Enum.filter(&video_file?/1)
+          |> length()
+
+        if video_files >= expected do
+          {:ok, Torrent.transition(torrent, :validating_media)}
+        else
+          # File count mismatch triggers auto-redownload
+          reason = "File count mismatch: expected #{expected}, got #{video_files}"
+          notify_servarr_of_failure(torrent, reason)
+
+          {:error, reason, Torrent.set_validation_error(torrent, reason)}
+        end
       end
     else
       {:ok, Torrent.transition(torrent, :validating_media)}
@@ -676,13 +730,19 @@ defmodule ProcessingQueue.Processor do
 
     case ServarrClient.get_queue_items_by_download_id(client, torrent.hash) do
       {:ok, []} ->
-        # No queue items found - torrent may have been added manually or already imported
-        # Treat as warning (not error) so download can proceed
-        Logger.warning(
-          "No queue items found for #{torrent.hash} in Servarr - torrent may have been added manually or already imported"
+        # No queue items found - this is a critical issue for file count validation
+        # The queue should contain the download that Sonarr just grabbed
+        # If it's empty, either:
+        # 1. Timing issue - Sonarr hasn't added it to queue yet
+        # 2. Already imported/removed - shouldn't happen this early
+        # 3. Queue was cleared - manual intervention
+        Logger.error(
+          "No queue items found for #{torrent.hash} in Servarr - cannot validate file count without expected count"
         )
 
-        {:ok, torrent}
+        # Return error so this can be retried or handled appropriately
+        # Don't set expected_files at all - let validation handle the nil case
+        {:error, :queue_empty}
 
       {:ok, queue_items} ->
         # Count queue items to get expected file count (one per expected file)
@@ -694,12 +754,11 @@ defmodule ProcessingQueue.Processor do
 
       {:error, reason} ->
         # Network/API errors - can't validate file count
-        # But don't fail the download - just proceed without this validation
-        Logger.warning(
-          "Failed to query Servarr queue for #{torrent.hash}: #{inspect(reason)} - proceeding without file count validation"
+        Logger.error(
+          "Failed to query Servarr queue for #{torrent.hash}: #{inspect(reason)} - cannot validate file count"
         )
 
-        {:ok, torrent}
+        {:error, reason}
     end
   end
 
