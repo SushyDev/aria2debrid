@@ -302,31 +302,12 @@ defmodule ProcessingQueue.Processor do
            )}
 
         true ->
-          # On first attempt or retry, trigger Servarr to refresh
-          # On retries after first, we just wait and retry the queue fetch
-          if torrent.retry_count == 0 do
-            # First attempt - trigger refresh and wait
-            Logger.debug("Triggering RefreshMonitoredDownloads and waiting for #{torrent.hash}")
-
-            case trigger_servarr_refresh_and_wait(torrent) do
-              :ok ->
-                handle_queue_fetch(torrent)
-
-              {:error, reason} ->
-                Logger.warning(
-                  "Failed to trigger Servarr refresh for #{torrent.hash}: #{inspect(reason)} - fetching queue anyway"
-                )
-
-                handle_queue_fetch(torrent)
-            end
-          else
-            # Retry attempt - just fetch queue again (no need to re-trigger refresh)
-            Logger.debug(
-              "Retry attempt #{torrent.retry_count} for #{torrent.hash}, fetching queue..."
-            )
-
-            handle_queue_fetch(torrent)
-          end
+          # Fetch expected file count from Servarr history
+          # We don't need to trigger RefreshMonitoredDownloads because history API
+          # is populated immediately when Sonarr grabs the release (unlike queue API)
+          # On retries, we just re-fetch the history
+          Logger.debug("Fetching expected file count from Servarr history for #{torrent.hash}")
+          handle_queue_fetch(torrent)
       end
     else
       # File count validation disabled - credentials are optional
@@ -705,11 +686,11 @@ defmodule ProcessingQueue.Processor do
         updated = %{updated | retry_count: 0}
         {:ok, Torrent.transition(updated, :waiting_download)}
 
-      {:error, :queue_empty} ->
-        # Queue is empty - retry a few times as this may be a timing issue
+      {:error, :history_empty} ->
+        # History is empty - retry a few times as this may be a timing issue
         if torrent.retry_count < max_retries do
           Logger.warning(
-            "Queue empty for #{torrent.hash}, will retry in 3s (attempt #{torrent.retry_count + 1}/#{max_retries})"
+            "History empty for #{torrent.hash}, will retry in 3s (attempt #{torrent.retry_count + 1}/#{max_retries})"
           )
 
           updated = %{torrent | retry_count: torrent.retry_count + 1}
@@ -717,18 +698,18 @@ defmodule ProcessingQueue.Processor do
         else
           # After max retries, fail with warning error
           reason =
-            "Queue empty in Servarr after #{max_retries} retries - cannot validate file count"
+            "History empty in Servarr after #{max_retries} retries - cannot validate file count"
 
           {:error, reason,
            Torrent.set_warning_error(
              torrent,
-             "Servarr queue empty after retries - may be manual add or already imported"
+             "Servarr history empty after retries - torrent may not have been grabbed by Servarr"
            )}
         end
 
       {:error, reason} ->
-        # API/network error fetching queue
-        error_msg = "Failed to fetch Servarr queue: #{inspect(reason)}"
+        # API/network error fetching history
+        error_msg = "Failed to fetch Servarr history: #{inspect(reason)}"
 
         {:error, error_msg,
          Torrent.set_warning_error(torrent, "Servarr API error: #{inspect(reason)}")}
@@ -738,34 +719,35 @@ defmodule ProcessingQueue.Processor do
   defp fetch_expected_files_from_servarr(torrent) do
     client = ServarrClient.new(torrent.servarr_url, torrent.servarr_api_key)
 
-    case ServarrClient.get_queue_items_by_download_id(client, torrent.hash) do
+    # Use history API instead of queue API - it's populated immediately when Sonarr grabs
+    # Queue API is slow to update and often empty when we check
+    case ServarrClient.get_history_items_by_download_id(client, torrent.hash) do
       {:ok, []} ->
-        # No queue items found - this is a critical issue for file count validation
-        # The queue should contain the download that Sonarr just grabbed
-        # If it's empty, either:
-        # 1. Timing issue - Sonarr hasn't added it to queue yet
-        # 2. Already imported/removed - shouldn't happen this early
-        # 3. Queue was cleared - manual intervention
+        # No history items found - this means Sonarr hasn't grabbed this torrent
+        # or the grab event hasn't been recorded yet
         Logger.error(
-          "No queue items found for #{torrent.hash} in Servarr - cannot validate file count without expected count"
+          "No history items found for #{torrent.hash} in Servarr - torrent may not have been grabbed by Sonarr"
         )
 
-        # Return error so this can be retried or handled appropriately
-        # Don't set expected_files at all - let validation handle the nil case
-        {:error, :queue_empty}
+        # Return error so this can be retried
+        {:error, :history_empty}
 
-      {:ok, queue_items} ->
-        # Count queue items to get expected file count (one per expected file)
-        expected_count = length(queue_items)
+      {:ok, history_items} ->
+        # Count history items to get expected file count
+        # For season packs, there's one history entry per episode
+        # For movies/single episodes, there's one history entry
+        expected_count = length(history_items)
 
-        Logger.info("Found #{expected_count} queue items for #{torrent.hash} in Servarr")
+        Logger.info(
+          "Found #{expected_count} grabbed history item(s) for #{torrent.hash} in Servarr"
+        )
 
         {:ok, %{torrent | expected_files: expected_count}}
 
       {:error, reason} ->
-        # Network/API errors - can't validate file count
+        # Network/API errors
         Logger.error(
-          "Failed to query Servarr queue for #{torrent.hash}: #{inspect(reason)} - cannot validate file count"
+          "Failed to query Servarr history for #{torrent.hash}: #{inspect(reason)} - cannot validate file count"
         )
 
         {:error, reason}
