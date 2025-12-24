@@ -2,22 +2,8 @@ defmodule Aria2Api.Handlers.Downloads do
   @moduledoc """
   Handles aria2 download management RPC methods.
 
-  Maps ProcessingQueue operations to aria2 JSON-RPC methods.
-
-  ## Servarr Credential Passing
-
-  Since aria2's RPC protocol doesn't support passing custom metadata,
-  we use the `dir` option to pass Servarr credentials for episode count
-  detection and failure notifications.
-
-  In Sonarr/Radarr, configure the download client's directory as:
-
-      http://sonarr:8989|YOUR_API_KEY
-
-  The format is: `servarr_url|api_key`
-
-  The pipe character is used as delimiter since URLs contain colons.
-  If no credentials are provided, episode count validation is skipped.
+  Maps ProcessingQueue operations to aria2 XML-RPC methods. Supports multi-tenant
+  filtering via secret token mapping or legacy credential passing via `dir` option.
   """
 
   require Logger
@@ -30,32 +16,27 @@ defmodule Aria2Api.Handlers.Downloads do
   @error_http 24
 
   @doc """
-  Handles aria2.addUri - Add download by URI.
+  Handles aria2.addUri - Add download by magnet URI.
 
-  params: [uris, options]
-  - uris: Array of URIs (we only support magnet links)
-  - options: Optional download options
-    - "dir": Can contain Servarr credentials in format "url|api_key"
-
-  Returns: GID of the new download
+  Credentials must be provided via SecretToken (url|api_key format).
   """
-  def add_uri([uris | rest]) when is_list(uris) do
-    options = List.first(rest) || %{}
+  def add_uri(params, servarr_credentials \\ nil)
+
+  def add_uri([uris | rest], servarr_credentials) when is_list(uris) do
+    _options = List.first(rest) || %{}
 
     case Enum.find(uris, &String.starts_with?(&1, "magnet:")) do
       nil ->
         {:error, -32602, "No valid magnet URI provided"}
 
       magnet ->
-        {servarr_url, servarr_api_key} = parse_servarr_credentials(options)
-
         opts =
-          if servarr_url && servarr_api_key do
-            Logger.debug("Extracted Servarr credentials from dir option: #{servarr_url}")
-            [servarr_url: servarr_url, servarr_api_key: servarr_api_key]
-          else
-            Logger.debug("No Servarr credentials in dir option")
-            []
+          case servarr_credentials do
+            {servarr_url, servarr_api_key} ->
+              [servarr_url: servarr_url, servarr_api_key: servarr_api_key]
+
+            nil ->
+              []
           end
 
         case ProcessingQueue.add_magnet(magnet, opts) do
@@ -71,38 +52,25 @@ defmodule Aria2Api.Handlers.Downloads do
     end
   end
 
-  def add_uri(_), do: {:error, -32602, "Invalid params"}
+  def add_uri(_, _), do: {:error, -32602, "Invalid params"}
 
   @doc """
   Handles aria2.addTorrent - Add download by torrent file.
 
-  params: [torrent_base64, uris, options]
-  - torrent_base64: Base64 encoded torrent file
-  - uris: Optional array of URIs (for web seeding, ignored)
-  - options: Optional download options
-    - "dir": Can contain Servarr credentials in format "url|api_key"
-
-  Returns: GID of the new download
+  Credentials must be provided via SecretToken (url|api_key format).
   """
-  def add_torrent([torrent_base64 | rest]) when is_binary(torrent_base64) do
+  def add_torrent(params, servarr_credentials \\ nil)
+
+  def add_torrent([torrent_base64 | _rest], servarr_credentials) when is_binary(torrent_base64) do
     case Base.decode64(torrent_base64) do
       {:ok, torrent_data} ->
-        options =
-          case rest do
-            [uris, opts] when is_list(uris) and is_map(opts) -> opts
-            [opts] when is_map(opts) -> opts
-            _ -> %{}
-          end
-
-        {servarr_url, servarr_api_key} = parse_servarr_credentials(options)
-
         opts =
-          if servarr_url && servarr_api_key do
-            Logger.debug("Extracted Servarr credentials from dir option: #{servarr_url}")
-            [servarr_url: servarr_url, servarr_api_key: servarr_api_key]
-          else
-            Logger.debug("No Servarr credentials in dir option")
-            []
+          case servarr_credentials do
+            {servarr_url, servarr_api_key} ->
+              [servarr_url: servarr_url, servarr_api_key: servarr_api_key]
+
+            nil ->
+              []
           end
 
         case ProcessingQueue.add_torrent_file(torrent_data, opts) do
@@ -122,7 +90,7 @@ defmodule Aria2Api.Handlers.Downloads do
     end
   end
 
-  def add_torrent(_params) do
+  def add_torrent(_params, _credentials) do
     {:error, -32602, "Invalid params: expected [torrent_base64, uris, options]"}
   end
 
@@ -160,23 +128,22 @@ defmodule Aria2Api.Handlers.Downloads do
   @doc """
   Handles aria2.tellActive - List active downloads.
 
-  params: [keys]
-  - keys: Optional array of keys to return
-
-  Returns: Array of active download statuses
+  Filters by Servarr instance using grabbed history (infohash matching).
+  Returns empty list if no credentials provided.
   """
-  def tell_active(params) do
+  def tell_active(params, servarr_credentials \\ nil) do
     keys = List.first(params) || []
 
     all_torrents = ProcessingQueue.list_torrents()
     processing_torrents = Enum.filter(all_torrents, &Torrent.processing?/1)
+    filtered_torrents = filter_by_servarr(processing_torrents, servarr_credentials)
 
     Logger.debug(
-      "tellActive: #{length(all_torrents)} total torrents, #{length(processing_torrents)} processing"
+      "tellActive: #{length(all_torrents)} total, #{length(processing_torrents)} processing, #{length(filtered_torrents)} after filtering"
     )
 
     downloads =
-      processing_torrents
+      filtered_torrents
       |> Enum.map(fn torrent ->
         gid = get_or_create_gid(torrent.hash)
         status = torrent_to_aria2(torrent, gid)
@@ -194,19 +161,20 @@ defmodule Aria2Api.Handlers.Downloads do
   @doc """
   Handles aria2.tellWaiting - List waiting downloads.
 
-  params: [offset, num, keys]
-  - offset: Start position
-  - num: Number of downloads to return
-  - keys: Optional array of keys to return
-
-  Returns: Array of waiting download statuses
+  Filters by Servarr instance using grabbed history (infohash matching).
+  Returns empty list if no credentials provided.
   """
-  def tell_waiting(params) do
+  def tell_waiting(params, servarr_credentials \\ nil) do
     {offset, num, keys} = parse_pagination_params(params)
 
-    downloads =
+    waiting_torrents =
       ProcessingQueue.list_torrents()
       |> Enum.filter(fn t -> t.state == :pending end)
+
+    filtered_torrents = filter_by_servarr(waiting_torrents, servarr_credentials)
+
+    downloads =
+      filtered_torrents
       |> Enum.drop(offset)
       |> Enum.take(num)
       |> Enum.map(fn torrent ->
@@ -221,25 +189,22 @@ defmodule Aria2Api.Handlers.Downloads do
   @doc """
   Handles aria2.tellStopped - List stopped downloads.
 
-  params: [offset, num, keys]
-  - offset: Start position
-  - num: Number of downloads to return
-  - keys: Optional array of keys to return
-
-  Returns: Array of stopped download statuses
+  Filters by Servarr instance using grabbed history (infohash matching).
+  Returns empty list if no credentials provided.
   """
-  def tell_stopped(params) do
+  def tell_stopped(params, servarr_credentials \\ nil) do
     {offset, num, keys} = parse_pagination_params(params)
 
     all_torrents = ProcessingQueue.list_torrents()
     stopped_torrents = Enum.filter(all_torrents, fn t -> t.state in [:success, :failed] end)
+    filtered_torrents = filter_by_servarr(stopped_torrents, servarr_credentials)
 
     Logger.debug(
-      "tellStopped: #{length(all_torrents)} total torrents, #{length(stopped_torrents)} stopped (offset=#{offset}, num=#{num})"
+      "tellStopped: #{length(all_torrents)} total, #{length(stopped_torrents)} stopped, #{length(filtered_torrents)} after filtering (offset=#{offset}, num=#{num})"
     )
 
     downloads =
-      stopped_torrents
+      filtered_torrents
       |> Enum.drop(offset)
       |> Enum.take(num)
       |> Enum.map(fn torrent ->
@@ -544,55 +509,103 @@ defmodule Aria2Api.Handlers.Downloads do
   end
 
   @doc """
-  Parses Servarr credentials from the `dir` option.
+  Filters torrents to only those belonging to the specified servarr instance.
 
-  The `dir` option can contain Servarr URL and API key in the format:
-  `http://sonarr:8989|YOUR_API_KEY`
+  Fetches the Servarr's grabbed history and only returns torrents whose hash appears
+  in that history. This is more reliable than URL matching since infohashes are consistent
+  across different network configurations.
 
-  Using pipe (|) as delimiter since URLs contain colons.
-
-  Returns `{servarr_url, servarr_api_key}` or `{nil, nil}` if not found.
+  History responses are cached per Servarr instance to avoid hammering the API.
   """
-  def parse_servarr_credentials(options) when is_map(options) do
-    case Map.get(options, "dir") do
-      nil ->
-        {nil, nil}
+  def filter_by_servarr(_torrents, nil) do
+    Logger.error("No Servarr credentials provided - this is required for multi-tenant security")
+    []
+  end
 
-      dir when is_binary(dir) ->
-        parse_dir_credentials(dir)
+  def filter_by_servarr(torrents, {servarr_url, servarr_api_key}) do
+    case get_servarr_grabbed_hashes(servarr_url, servarr_api_key) do
+      {:ok, grabbed_hashes} ->
+        filtered =
+          Enum.filter(torrents, fn torrent ->
+            MapSet.member?(grabbed_hashes, String.downcase(torrent.hash))
+          end)
 
-      _ ->
-        {nil, nil}
+        Logger.debug(
+          "Filtered torrents by servarr history (#{servarr_url}): #{length(torrents)} -> #{length(filtered)}"
+        )
+
+        filtered
+
+      {:error, reason} ->
+        Logger.error(
+          "Failed to fetch Servarr history for filtering (#{servarr_url}): #{inspect(reason)} - returning empty list"
+        )
+
+        []
     end
   end
 
-  def parse_servarr_credentials(_), do: {nil, nil}
+  @doc """
+  Fetches infohashes from Servarr's grabbed history with ETS caching.
+  Cache TTL configurable via SERVARR_HISTORY_CACHE_TTL (default: 30 seconds).
+  """
+  def get_servarr_grabbed_hashes(servarr_url, servarr_api_key) do
+    cache_key = {servarr_url, servarr_api_key}
+    ttl_ms = Aria2Debrid.Config.servarr_history_cache_ttl() * 1000
 
-  defp parse_dir_credentials(dir) do
-    case split_on_last_pipe(dir) do
-      {url, api_key} when byte_size(url) > 0 and byte_size(api_key) > 0 ->
-        if String.starts_with?(url, "http://") or String.starts_with?(url, "https://") do
-          {url, api_key}
+    case lookup_cache(cache_key) do
+      {:ok, grabbed_hashes} ->
+        {:ok, grabbed_hashes}
+
+      :miss ->
+        client = ServarrClient.new(servarr_url, servarr_api_key)
+        max_items = Aria2Debrid.Config.servarr_history_page_size()
+
+        case ServarrClient.get_grabbed_download_ids(client, max_items: max_items) do
+          {:ok, grabbed_hashes} ->
+            store_cache(cache_key, grabbed_hashes, ttl_ms)
+            {:ok, grabbed_hashes}
+
+          {:error, reason} ->
+            {:error, reason}
+        end
+    end
+  end
+
+  # ETS cache for Servarr history responses
+  @cache_table :servarr_history_cache
+
+  defp ensure_cache_table do
+    case :ets.whereis(@cache_table) do
+      :undefined ->
+        :ets.new(@cache_table, [:set, :public, :named_table, read_concurrency: true])
+
+      _tid ->
+        :ok
+    end
+  end
+
+  defp lookup_cache(key) do
+    ensure_cache_table()
+
+    case :ets.lookup(@cache_table, key) do
+      [{^key, value, expires_at}] ->
+        if System.monotonic_time(:millisecond) < expires_at do
+          {:ok, value}
         else
-          Logger.debug("Dir option doesn't look like servarr credentials: #{dir}")
-          {nil, nil}
+          :ets.delete(@cache_table, key)
+          :miss
         end
 
-      _ ->
-        {nil, nil}
+      [] ->
+        :miss
     end
   end
 
-  defp split_on_last_pipe(string) do
-    case :binary.matches(string, "|") do
-      [] ->
-        {string, ""}
-
-      matches ->
-        {pos, _len} = List.last(matches)
-        url = binary_part(string, 0, pos)
-        api_key = binary_part(string, pos + 1, byte_size(string) - pos - 1)
-        {url, api_key}
-    end
+  defp store_cache(key, value, ttl_ms) do
+    ensure_cache_table()
+    expires_at = System.monotonic_time(:millisecond) + ttl_ms
+    :ets.insert(@cache_table, {key, value, expires_at})
+    :ok
   end
 end

@@ -100,7 +100,11 @@ defmodule Aria2Api.Router do
 
         case validate_secret(secret) do
           :ok ->
-            result = dispatch_method(method, params)
+            result = dispatch_method(method, params, nil)
+            send_xmlrpc_response(conn, result)
+
+          {:ok, servarr_credentials} ->
+            result = dispatch_method(method, params, servarr_credentials)
             send_xmlrpc_response(conn, result)
 
           {:error, message} ->
@@ -141,46 +145,91 @@ defmodule Aria2Api.Router do
   defp extract_secret(params), do: {nil, params}
 
   defp validate_secret(provided_secret) do
-    case Aria2Debrid.Config.aria2_secret() do
-      nil -> :ok
-      "" -> :ok
-      expected when provided_secret == expected -> :ok
-      _expected -> {:error, "Unauthorized"}
+    case get_servarr_from_secret(provided_secret) do
+      {:ok, servarr_credentials} ->
+        {:ok, servarr_credentials}
+
+      :not_found ->
+        case Aria2Debrid.Config.aria2_secret() do
+          nil -> :ok
+          "" -> :ok
+          expected when provided_secret == expected -> :ok
+          _expected -> {:error, "Unauthorized"}
+        end
     end
   end
 
-  defp dispatch_method("aria2.addUri", params), do: Downloads.add_uri(params)
-  defp dispatch_method("aria2.addTorrent", params), do: Downloads.add_torrent(params)
-  defp dispatch_method("aria2.tellStatus", params), do: Downloads.tell_status(params)
-  defp dispatch_method("aria2.tellActive", params), do: Downloads.tell_active(params)
-  defp dispatch_method("aria2.tellWaiting", params), do: Downloads.tell_waiting(params)
-  defp dispatch_method("aria2.tellStopped", params), do: Downloads.tell_stopped(params)
-  defp dispatch_method("aria2.remove", params), do: Downloads.remove(params)
-  defp dispatch_method("aria2.forceRemove", params), do: Downloads.force_remove(params)
+  defp get_servarr_from_secret(nil), do: :not_found
 
-  defp dispatch_method("aria2.removeDownloadResult", params),
+  defp get_servarr_from_secret(provided_secret) do
+    case String.split(provided_secret, "|", parts: 2) do
+      [url, api_key] when byte_size(url) > 0 and byte_size(api_key) > 0 ->
+        if String.starts_with?(url, ["http://", "https://"]) do
+          {:ok, {url, api_key}}
+        else
+          :not_found
+        end
+
+      _ ->
+        :not_found
+    end
+  end
+
+  defp dispatch_method("aria2.addUri", params, creds), do: Downloads.add_uri(params, creds)
+
+  defp dispatch_method("aria2.addTorrent", params, creds),
+    do: Downloads.add_torrent(params, creds)
+
+  defp dispatch_method("aria2.tellStatus", params, _creds), do: Downloads.tell_status(params)
+
+  defp dispatch_method("aria2.tellActive", params, creds),
+    do: Downloads.tell_active(params, creds)
+
+  defp dispatch_method("aria2.tellWaiting", params, creds),
+    do: Downloads.tell_waiting(params, creds)
+
+  defp dispatch_method("aria2.tellStopped", params, creds),
+    do: Downloads.tell_stopped(params, creds)
+
+  defp dispatch_method("aria2.remove", params, _creds), do: Downloads.remove(params)
+  defp dispatch_method("aria2.forceRemove", params, _creds), do: Downloads.force_remove(params)
+
+  defp dispatch_method("aria2.removeDownloadResult", params, _creds),
     do: Downloads.remove_download_result(params)
 
-  defp dispatch_method("aria2.pause", params), do: Downloads.pause(params)
-  defp dispatch_method("aria2.unpause", params), do: Downloads.unpause(params)
-  defp dispatch_method("aria2.getGlobalOption", _params), do: System.get_global_option()
-  defp dispatch_method("aria2.getGlobalStat", _params), do: System.get_global_stat()
-  defp dispatch_method("aria2.getVersion", _params), do: System.get_version()
-  defp dispatch_method("aria2.getSessionInfo", _params), do: System.get_session_info()
+  defp dispatch_method("aria2.pause", params, _creds), do: Downloads.pause(params)
+  defp dispatch_method("aria2.unpause", params, _creds), do: Downloads.unpause(params)
+  defp dispatch_method("aria2.getGlobalOption", _params, _creds), do: System.get_global_option()
+  defp dispatch_method("aria2.getGlobalStat", _params, _creds), do: System.get_global_stat()
 
-  defp dispatch_method("system.multicall", params), do: handle_multicall(params)
-  defp dispatch_method("system.listMethods", _params), do: System.list_methods()
+  defp dispatch_method("aria2.getVersion", _params, creds) do
+    # Validate credentials during getVersion (called by Sonarr/Radarr test button)
+    case System.validate_credentials(creds) do
+      {:ok, _result} ->
+        # Credentials valid, return version info
+        System.get_version()
 
-  defp dispatch_method(method, _params) do
+      {:error, code, message} ->
+        # Credentials invalid, return error
+        {:error, code, message}
+    end
+  end
+
+  defp dispatch_method("aria2.getSessionInfo", _params, _creds), do: System.get_session_info()
+
+  defp dispatch_method("system.multicall", params, creds), do: handle_multicall(params, creds)
+  defp dispatch_method("system.listMethods", _params, _creds), do: System.list_methods()
+
+  defp dispatch_method(method, _params, _creds) do
     Logger.warning("Unknown aria2 method: #{method}")
     {:error, -32601, "Method not found: #{method}"}
   end
 
-  defp handle_multicall([calls]) when is_list(calls) do
+  defp handle_multicall([calls], creds) when is_list(calls) do
     results =
       Enum.map(calls, fn
         %{"methodName" => method, "params" => params} ->
-          case dispatch_method(method, params) do
+          case dispatch_method(method, params, creds) do
             {:ok, result} -> [result]
             {:error, code, message} -> %{"faultCode" => code, "faultString" => message}
           end
@@ -192,7 +241,7 @@ defmodule Aria2Api.Router do
     {:ok, results}
   end
 
-  defp handle_multicall(_), do: {:error, -32602, "Invalid params"}
+  defp handle_multicall(_, _creds), do: {:error, -32602, "Invalid params"}
 
   match _ do
     Logger.warning("Unmatched route: #{conn.method} #{conn.request_path}")

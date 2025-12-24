@@ -93,6 +93,42 @@ defmodule Aria2Api.Handlers.System do
   end
 
   @doc """
+  Validates Servarr credentials by calling the system/status endpoint.
+  Called during Sonarr/Radarr's "Test" button.
+  """
+  def validate_credentials(nil) do
+    {:ok, %{"status" => "ok", "message" => "No credentials configured"}}
+  end
+
+  def validate_credentials({servarr_url, servarr_api_key}) do
+    require Logger
+
+    Logger.info(
+      "Validating Servarr credentials: url=#{servarr_url}, api_key=#{String.slice(servarr_api_key, 0..7)}..."
+    )
+
+    client = ServarrClient.new(servarr_url, servarr_api_key)
+
+    case ServarrClient.test_connection(client) do
+      :ok ->
+        Logger.info("✓ Servarr credentials validated: #{servarr_url}")
+
+        {:ok,
+         %{
+           "status" => "ok",
+           "message" => "Successfully connected to Servarr",
+           "servarrUrl" => servarr_url
+         }}
+
+      {:error, reason} ->
+        Logger.error("✗ Servarr validation failed: #{servarr_url} - #{inspect(reason)}")
+
+        {:error, 1,
+         "Failed to connect to Servarr at #{servarr_url}: #{inspect(reason)}. Check SecretToken format (url|api_key) and ensure Servarr is accessible."}
+    end
+  end
+
+  @doc """
   Handles system.listMethods - List available RPC methods.
 
   Returns: Array of method names

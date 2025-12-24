@@ -3,74 +3,53 @@ defmodule Aria2Api.Handlers.DownloadsTest do
 
   alias Aria2Api.Handlers.Downloads
 
-  describe "parse_servarr_credentials/1" do
-    test "parses valid credentials from dir option" do
-      options = %{"dir" => "http://sonarr:8989|my-api-key-123"}
+  describe "filter_by_servarr/2" do
+    setup do
+      # Create sample torrents
+      torrent1 = %ProcessingQueue.Torrent{
+        hash: "ABC123DEF456789012345678901234567890ABCD",
+        magnet: "magnet:?xt=urn:btih:abc123",
+        state: :waiting_download,
+        servarr_url: "http://sonarr:8989",
+        servarr_api_key: "sonarr-key-123",
+        added_at: DateTime.utc_now()
+      }
 
-      assert {url, api_key} = Downloads.parse_servarr_credentials(options)
-      assert url == "http://sonarr:8989"
-      assert api_key == "my-api-key-123"
+      torrent2 = %ProcessingQueue.Torrent{
+        hash: "DEF456ABC789012345678901234567890ABCDEF12",
+        magnet: "magnet:?xt=urn:btih:def456",
+        state: :success,
+        servarr_url: "http://radarr:7878",
+        servarr_api_key: "radarr-key-456",
+        added_at: DateTime.utc_now()
+      }
+
+      torrent3 = %ProcessingQueue.Torrent{
+        hash: "GHI789012345678901234567890ABCDEF12345678",
+        magnet: "magnet:?xt=urn:btih:ghi789",
+        state: :waiting_download,
+        servarr_url: "http://sonarr:8989",
+        servarr_api_key: "sonarr-key-123",
+        added_at: DateTime.utc_now()
+      }
+
+      torrent4 = %ProcessingQueue.Torrent{
+        hash: "JKL012345678901234567890ABCDEF1234567890",
+        magnet: "magnet:?xt=urn:btih:jkl012",
+        state: :failed,
+        servarr_url: nil,
+        servarr_api_key: nil,
+        added_at: DateTime.utc_now()
+      }
+
+      {:ok, torrents: [torrent1, torrent2, torrent3, torrent4]}
     end
 
-    test "parses https URL" do
-      options = %{"dir" => "https://radarr.example.com:7878|secret-key"}
-
-      assert {url, api_key} = Downloads.parse_servarr_credentials(options)
-      assert url == "https://radarr.example.com:7878"
-      assert api_key == "secret-key"
-    end
-
-    test "parses URL with path" do
-      options = %{"dir" => "http://localhost:8989/sonarr|api-key"}
-
-      assert {url, api_key} = Downloads.parse_servarr_credentials(options)
-      assert url == "http://localhost:8989/sonarr"
-      assert api_key == "api-key"
-    end
-
-    test "returns nil for regular directory path" do
-      options = %{"dir" => "/downloads/movies"}
-
-      assert {nil, nil} = Downloads.parse_servarr_credentials(options)
-    end
-
-    test "returns nil for empty dir" do
-      options = %{"dir" => ""}
-
-      assert {nil, nil} = Downloads.parse_servarr_credentials(options)
-    end
-
-    test "returns nil for missing dir option" do
-      options = %{}
-
-      assert {nil, nil} = Downloads.parse_servarr_credentials(options)
-    end
-
-    test "returns nil for nil options" do
-      assert {nil, nil} = Downloads.parse_servarr_credentials(nil)
-    end
-
-    test "returns nil for non-http URL in dir" do
-      options = %{"dir" => "ftp://server.com|key"}
-
-      assert {nil, nil} = Downloads.parse_servarr_credentials(options)
-    end
-
-    test "handles URL with multiple colons (ipv6)" do
-      # IPv6 addresses have many colons, the pipe delimiter handles this
-      options = %{"dir" => "http://[::1]:8989|api-key"}
-
-      assert {url, api_key} = Downloads.parse_servarr_credentials(options)
-      assert url == "http://[::1]:8989"
-      assert api_key == "api-key"
-    end
-
-    test "handles api key with special characters" do
-      options = %{"dir" => "http://sonarr:8989|abc123!@#$%"}
-
-      assert {url, api_key} = Downloads.parse_servarr_credentials(options)
-      assert url == "http://sonarr:8989"
-      assert api_key == "abc123!@#$%"
+    test "returns empty list when no credentials provided", %{
+      torrents: torrents
+    } do
+      result = Downloads.filter_by_servarr(torrents, nil)
+      assert length(result) == 0
     end
   end
 end

@@ -25,6 +25,18 @@ defmodule ServarrClient do
   end
 
   @doc """
+  Tests connection to Servarr by calling /api/v3/system/status.
+  """
+  @spec test_connection(client()) :: :ok | error()
+  def test_connection(client) do
+    case request(client, "/api/v3/system/status", %{}) do
+      {:ok, %{"version" => _version}} -> :ok
+      {:ok, _response} -> :ok
+      {:error, reason} -> {:error, reason}
+    end
+  end
+
+  @doc """
   Fetches the download queue from Sonarr/Radarr.
 
   Returns a list of queue items that are currently being processed.
@@ -84,6 +96,35 @@ defmodule ServarrClient do
       {:ok, response} when is_list(response) ->
         items = Enum.map(response, &HistoryItem.from_api/1)
         {:ok, items}
+
+      {:error, reason} ->
+        {:error, reason}
+    end
+  end
+
+  @doc """
+  Fetches grabbed download IDs for multi-tenant filtering.
+
+  Returns a MapSet of infohashes from the Servarr's grabbed history.
+  Uses `/api/v3/history/since?eventType=grabbed` which works for both Sonarr and Radarr.
+  """
+  @spec get_grabbed_download_ids(client(), keyword()) :: {:ok, MapSet.t(String.t())} | error()
+  def get_grabbed_download_ids(client, _opts \\ []) do
+    case request(client, "/api/v3/history/since", %{eventType: "grabbed"}) do
+      {:ok, records} when is_list(records) ->
+        download_ids =
+          records
+          |> Enum.map(fn record ->
+            Map.get(record, "downloadId") || Map.get(record, :download_id)
+          end)
+          |> Enum.filter(&(&1 != nil))
+          |> Enum.map(&String.downcase/1)
+          |> MapSet.new()
+
+        {:ok, download_ids}
+
+      {:ok, _unexpected_format} ->
+        {:error, :unexpected_response_format}
 
       {:error, reason} ->
         {:error, reason}

@@ -433,19 +433,20 @@ defmodule ProcessingQueue.Processor do
       save_path = torrent.save_path
       max_retries = Aria2Debrid.Config.path_validation_retries()
 
-      if save_path && File.exists?(save_path) do
+      # Check if path exists AND contains files (not just empty directory)
+      if save_path && File.exists?(save_path) && path_has_files?(save_path) do
         Logger.info("Path validated for torrent #{torrent.hash}: #{save_path}")
         {:ok, Torrent.transition(torrent, :success)}
       else
-        # Path doesn't exist yet - likely still syncing via rclone
+        # Path doesn't exist yet or is empty - likely still syncing via rclone
         if torrent.retry_count >= max_retries do
-          reason = "Path not found after #{max_retries} retries: #{save_path}"
+          reason = "Path not found or empty after #{max_retries} retries: #{save_path}"
 
           {:error, reason,
            Torrent.set_validation_error(torrent, "Path validation timeout - file not available")}
         else
           Logger.debug(
-            "Path not found yet for #{torrent.hash} (attempt #{torrent.retry_count + 1}/#{max_retries}): #{save_path}"
+            "Path not ready yet for #{torrent.hash} (attempt #{torrent.retry_count + 1}/#{max_retries}): #{save_path}"
           )
 
           updated = %{torrent | retry_count: torrent.retry_count + 1}
@@ -526,6 +527,15 @@ defmodule ProcessingQueue.Processor do
   end
 
   # Helper functions
+
+  defp path_has_files?(path) when is_binary(path) do
+    case File.ls(path) do
+      {:ok, files} -> Enum.any?(files)
+      {:error, _} -> false
+    end
+  end
+
+  defp path_has_files?(_), do: false
 
   defp get_rd_client do
     token = Aria2Debrid.Config.real_debrid_token()

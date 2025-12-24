@@ -65,12 +65,63 @@
 - Warning errors = non-critical issues that shouldn't fail the download
 - Application errors = configuration issues requiring admin intervention (should raise, not fail silently)
 
-### 4. Sonarr Credential Passing
-**Edge Case** (see `apps/aria2_api/lib/aria2_api/handlers/downloads.ex:7-21`):
-- Sonarr passes credentials in `dir` option as `{url}|{api_key}`
-- Format: `http://sonarr:8989|abc123def456`
-- Used for episode count validation and queue lookups
-- Must handle missing/invalid credentials gracefully (warning, not failure)
+### 4. Multi-Tenant Support (Multiple Sonarr/Radarr Instances)
+**Critical Decision** (see `apps/aria2_api/lib/aria2_api/router.ex`):
+
+**Problem**: Without proper filtering, multiple Sonarr/Radarr instances would see each other's downloads in the Activity queue, leading to confusion and potential conflicts.
+
+**Solution**: Map aria2 secrets to Servarr instances, then filter torrents by matching infohashes against each Servarr's grabbed history.
+
+**Why Not HTTP Basic Auth?**
+- Sonarr/Radarr's aria2 client doesn't support HTTP Basic Auth configuration
+- Only available fields are: Host, Port, SecretToken, Directory, RpcPath, UseSsl
+- We use unique secrets per Servarr instead
+
+**Why History API Instead of URL Matching?**
+- URLs can vary between requests (internal vs external, docker names vs IPs, HTTP vs HTTPS)
+- Example: Same Sonarr could be `http://sonarr:8989`, `http://192.168.1.100:8989`, `https://sonarr.example.com`
+- Infohashes are always consistent regardless of how the torrent was grabbed
+- More reliable and handles complex networking setups
+
+**Configuration**:
+
+In Sonarr/Radarr Download Client Settings:
+- **Host**: `aria2debrid.example.com`
+- **Port**: `6800`
+- **SecretToken**: `http://sonarr:8989|YOUR_SONARR_API_KEY`
+- **Directory**: Leave empty
+- **RpcPath**: `/rpc`
+- **Use SSL**: Enable if using HTTPS
+
+The SecretToken is parsed directly as `url|api_key` format. The pipe character `|` is used as delimiter since URLs contain colons.
+
+**How It Works**:
+- When Sonarr/Radarr makes a request:
+  1. aria2debrid extracts the secret token from the request
+  2. Parses it as `url|api_key` to get Servarr credentials
+  3. Fetches that Servarr's grabbed history via `/api/v3/history?eventType=grabbed`
+  4. Filters torrents to only show those whose infohash appears in that Servarr's grabbed history
+  5. Returns filtered list (each Servarr only sees downloads it grabbed)
+
+**Error Handling**:
+- **No secret provided**: Returns empty list (enforces multi-tenant security)
+- **Invalid secret format**: Returns empty list (enforces multi-tenant security)
+- **History API call fails**: Returns empty list + error log (prevents cross-contamination)
+
+**Cache Strategy**:
+- History responses cached per Servarr instance (default: 30 seconds TTL)
+- Configurable via `SERVARR_HISTORY_CACHE_TTL` env var (seconds)
+- Page size configurable via `SERVARR_HISTORY_PAGE_SIZE` (default: 1000)
+- ETS-based caching prevents excessive API calls during frequent status polls
+
+**Key Points**:
+- Credentials passed directly in SecretToken field as `url|api_key`
+- Each Servarr instance uses unique credentials in their SecretToken
+- Servarr URL can be any URL that reaches the Servarr API (internal/external)
+- API key must be valid for the Servarr instance
+- Prevents Sonarr from seeing Radarr's downloads and vice versa (via infohash filtering)
+- Handles complex networking (internal/external, docker, proxies, etc.)
+- **REQUIRED**: SecretToken must be configured, otherwise returns empty list (no downloads visible)
 
 ### 5. Torrent Completion Requirements
 **Critical Decision**:
