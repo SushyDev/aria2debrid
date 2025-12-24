@@ -227,10 +227,32 @@ validating_paths → success (or failed)
   - This allows Sonarr to control when completed downloads are cleaned up
 
 **Real-Debrid Cleanup Strategy:**
-- **Failed torrents removed by cleanup**: RD resources deleted
-- **Failed torrents removed by Sonarr**: RD resources deleted
-- **Completed torrents removed by Sonarr**: RD resources kept (user may want them available)
-- **Manual removal via aria2.forceRemove**: RD resources deleted only if failed
+
+Real-Debrid resources are managed based on **failure type** using `ErrorClassifier.cleanup_rd?/1`:
+
+**Automatic Cleanup (after retention period):**
+- **Validation failures** (`:validation`) → KEEP RD resources
+  - Sonarr may need to inspect the files
+  - Examples: file count mismatch, media validation failure
+- **Permanent failures** (`:permanent`) → DELETE RD resources
+  - Non-retryable errors, no reason to keep resources
+  - Examples: RD API errors, network timeouts, invalid magnets
+- **Warning failures** (`:warning`) → KEEP RD resources
+  - May recover or need manual intervention
+  - Examples: empty queue, temporary Servarr API failures
+- **Application errors** (`:application`) → KEEP RD resources
+  - System/config issues requiring admin intervention
+  - Examples: missing FFmpeg, invalid configuration
+
+**Manual Removal (via aria2.remove/forceRemove):**
+- **Failed torrents**: Follow failure type rules above
+- **Completed torrents**: RD resources ALWAYS kept (user may want them)
+- **Processing torrents**: RD resources kept (user may want to investigate)
+
+**Sonarr/Radarr Removal (via aria2.removeDownloadResult):**
+- **Completed torrents**: RD resources ALWAYS kept (user may want them available)
+- **Failed torrents**: Follow failure type rules above
+
 
 **GID Registry Cleanup:**
 - Manager calls `GidRegistry.unregister/1` for both `remove_torrent` and `cleanup_torrents`
@@ -265,9 +287,11 @@ See `FSM_UPGRADE_PLAN.md` for comprehensive test suite additions:
 3. **DON'T add JSON-RPC code** - Sonarr/Radarr don't use it
 4. **DON'T mark torrent complete before all validation passes** - Sonarr will import invalid files
 5. **DON'T cleanup Real-Debrid for validation failures** - Sonarr needs to inspect
-6. **DON'T fail silently on application errors** - raise exceptions for admin attention
-7. **DON'T use hardcoded error messages** - use ErrorClassifier for consistent categorization
-8. **DON'T transition backwards in FSM** - only forward to terminal states
+6. **DON'T cleanup Real-Debrid for completed downloads** - user may want them available
+7. **DON'T fail silently on application errors** - raise exceptions for admin attention
+8. **DON'T use hardcoded error messages** - use ErrorClassifier for consistent categorization
+9. **DON'T transition backwards in FSM** - only forward to terminal states
+10. **DON'T cleanup RD without checking failure_type** - use ErrorClassifier.cleanup_rd?/1
 
 ## Reference Files
 

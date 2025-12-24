@@ -28,14 +28,45 @@ defmodule ProcessingQueue.Cleanup do
   - Sonarr has time to detect the failure and run the Failed Download Handler
   - The failed download remains visible in Sonarr's queue long enough for inspection
   - Failed downloads don't accumulate indefinitely
-  - Real-Debrid resources are cleaned up promptly for failed downloads
+  - Real-Debrid resources are cleaned up based on failure type (see below)
+
+  ## Real-Debrid Cleanup Strategy
+
+  Real-Debrid resources are managed based on failure type using `ErrorClassifier`:
+
+  - **Validation failures** (`:validation`) - KEEP RD resources
+    - Sonarr may need to inspect the files
+    - Allows manual investigation of what went wrong
+    - Examples: file count mismatch, media validation failure
+
+  - **Permanent failures** (`:permanent`) - DELETE RD resources
+    - No reason to keep resources for non-retryable errors
+    - Saves RD quota and storage
+    - Examples: RD API errors, network timeouts, invalid magnets
+
+  - **Warning failures** (`:warning`) - KEEP RD resources
+    - May recover or need manual intervention
+    - Examples: empty queue, temporary Servarr API failures
+
+  - **Application errors** (`:application`) - KEEP RD resources
+    - System/config issues requiring admin intervention
+    - Resources kept until admin fixes the problem
+    - Examples: missing FFmpeg, invalid configuration
 
   ## Completed Downloads
 
   Completed downloads (status="success") are NOT automatically cleaned up by this module:
   - Sonarr WILL remove them via `aria2.removeDownloadResult` (if RemoveCompletedDownloads=true)
-  - Real-Debrid resources remain available until Sonarr explicitly removes them
+  - Real-Debrid resources ALWAYS remain available when completed downloads are removed
   - This allows Sonarr to control when completed downloads are cleaned up
+  - RD resources stay available for the user even after Sonarr removes the download
+
+  ## Manual Removal
+
+  When a download is manually removed (via `aria2.remove` or `aria2.forceRemove`):
+  - Failed downloads: RD cleanup follows the same failure type rules as automatic cleanup
+  - Completed downloads: RD resources are kept (user may want them available)
+  - Processing downloads: RD resources are kept (user may want to investigate)
 
   ## Configuration
 

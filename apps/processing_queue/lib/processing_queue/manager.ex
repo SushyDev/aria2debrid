@@ -223,15 +223,24 @@ defmodule ProcessingQueue.Manager do
     stop_processor(hash)
 
     case Map.get(state.torrents, hash) do
-      %Torrent{rd_id: rd_id, state: torrent_state} when not is_nil(rd_id) ->
-        if torrent_state == :failed do
-          Logger.debug("Removing failed torrent #{hash} - cleaning up Real-Debrid")
+      %Torrent{rd_id: rd_id, state: :failed, failure_type: failure_type} when not is_nil(rd_id) ->
+        # Use ErrorClassifier to determine if RD should be cleaned up
+        if ProcessingQueue.ErrorClassifier.cleanup_rd?(failure_type) do
+          Logger.debug(
+            "Removing failed torrent #{hash} with #{failure_type} error - cleaning up Real-Debrid"
+          )
+
           cleanup_real_debrid(rd_id, hash)
         else
           Logger.debug(
-            "Removing #{torrent_state} torrent #{hash} - keeping Real-Debrid resources (Sonarr-initiated removal)"
+            "Removing failed torrent #{hash} with #{failure_type} error - keeping Real-Debrid for inspection"
           )
         end
+
+      %Torrent{state: torrent_state} when not is_nil(torrent_state) ->
+        Logger.debug(
+          "Removing #{torrent_state} torrent #{hash} - keeping Real-Debrid resources (user/Sonarr-initiated removal)"
+        )
 
       _ ->
         Logger.debug("Removing torrent #{hash} - no Real-Debrid ID")
@@ -287,9 +296,20 @@ defmodule ProcessingQueue.Manager do
 
     Enum.each(hashes, fn hash ->
       case Map.get(state.torrents, hash) do
-        %Torrent{rd_id: rd_id, state: :failed} when not is_nil(rd_id) ->
-          Logger.debug("Cleanup: #{hash} is failed - cleaning up Real-Debrid ID #{rd_id}")
-          cleanup_real_debrid(rd_id, hash)
+        %Torrent{rd_id: rd_id, state: :failed, failure_type: failure_type}
+        when not is_nil(rd_id) ->
+          # Use ErrorClassifier to determine if RD should be cleaned up
+          if ProcessingQueue.ErrorClassifier.cleanup_rd?(failure_type) do
+            Logger.debug(
+              "Cleanup: #{hash} is failed with #{failure_type} error - cleaning up Real-Debrid ID #{rd_id}"
+            )
+
+            cleanup_real_debrid(rd_id, hash)
+          else
+            Logger.debug(
+              "Cleanup: #{hash} is failed with #{failure_type} error - keeping Real-Debrid resources for inspection"
+            )
+          end
 
         %Torrent{state: torrent_state} ->
           Logger.warning(
