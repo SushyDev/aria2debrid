@@ -172,6 +172,10 @@ defmodule ProcessingQueue.Torrent do
 
   @doc """
   Returns true if this torrent should be cleaned up.
+
+  Only failed torrents are automatically cleaned up after the retention period.
+  Completed/success torrents are NEVER automatically cleaned up - Sonarr/Radarr
+  will handle removal via aria2.removeDownloadResult.
   """
   @spec should_cleanup?(t()) :: boolean()
   def should_cleanup?(%__MODULE__{state: :failed, failed_at: failed_at})

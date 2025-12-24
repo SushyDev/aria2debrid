@@ -647,8 +647,8 @@ defmodule ProcessingQueue.Processor do
             :ok
 
           {:error, reason} ->
-            Logger.warning("Media validation failed for #{filename}: #{reason}")
-            {:error, "#{filename}: #{reason}"}
+            Logger.warning("Media validation failed for #{filename}: #{inspect(reason)}")
+            {:error, "#{filename}: #{inspect(reason)}"}
         end
 
       {:error, reason} ->
