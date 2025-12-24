@@ -58,35 +58,33 @@ defmodule Aria2Api.Handlers.Downloads do
   Handles aria2.addTorrent - Add download by torrent file.
 
   Credentials must be provided via SecretToken (url|api_key format).
+
+  Note: The torrent data is already decoded from base64 by the XML-RPC parser.
+  The XmlRpc module automatically decodes <base64> elements, so we receive
+  raw binary torrent data here, not base64-encoded string.
   """
   def add_torrent(params, servarr_credentials \\ nil)
 
-  def add_torrent([torrent_base64 | _rest], servarr_credentials) when is_binary(torrent_base64) do
-    case Base.decode64(torrent_base64) do
-      {:ok, torrent_data} ->
-        opts =
-          case servarr_credentials do
-            {servarr_url, servarr_api_key} ->
-              [servarr_url: servarr_url, servarr_api_key: servarr_api_key]
+  def add_torrent([torrent_data | _rest], servarr_credentials) when is_binary(torrent_data) do
+    # torrent_data is already raw binary (decoded by XML-RPC parser from <base64> element)
+    opts =
+      case servarr_credentials do
+        {servarr_url, servarr_api_key} ->
+          [servarr_url: servarr_url, servarr_api_key: servarr_api_key]
 
-            nil ->
-              []
-          end
+        nil ->
+          []
+      end
 
-        case ProcessingQueue.add_torrent_file(torrent_data, opts) do
-          {:ok, hash} ->
-            gid = GidRegistry.register(hash)
-            Logger.info("Added torrent file: gid=#{gid} hash=#{hash}")
-            {:ok, gid}
+    case ProcessingQueue.add_torrent_file(torrent_data, opts) do
+      {:ok, hash} ->
+        gid = GidRegistry.register(hash)
+        Logger.info("Added torrent file: gid=#{gid} hash=#{hash}")
+        {:ok, gid}
 
-          {:error, reason} ->
-            Logger.error("Failed to add torrent file: #{inspect(reason)}")
-            {:error, @error_unknown, "Failed to add torrent: #{inspect(reason)}"}
-        end
-
-      :error ->
-        Logger.error("Failed to decode base64 torrent data")
-        {:error, -32602, "Invalid base64 encoding for torrent file"}
+      {:error, reason} ->
+        Logger.error("Failed to add torrent file: #{inspect(reason)}")
+        {:error, @error_unknown, "Failed to add torrent: #{inspect(reason)}"}
     end
   end
 
@@ -263,18 +261,28 @@ defmodule Aria2Api.Handlers.Downloads do
   def remove_download_result([gid]) when is_binary(gid) do
     case GidRegistry.lookup_hash(gid) do
       {:ok, hash} ->
+        Logger.info("Radarr/Sonarr called removeDownloadResult for gid=#{gid} hash=#{hash}")
+
         case ProcessingQueue.remove_torrent(hash) do
           :ok ->
             GidRegistry.unregister(gid)
-            Logger.info("Removed download result: gid=#{gid}")
+            Logger.info("Successfully removed download result: gid=#{gid} hash=#{hash}")
             {:ok, "OK"}
 
-          {:error, _reason} ->
+          {:error, reason} ->
+            Logger.warning(
+              "Failed to remove download result for gid=#{gid} hash=#{hash}: #{inspect(reason)}, cleaning up GID anyway"
+            )
+
             GidRegistry.unregister(gid)
             {:ok, "OK"}
         end
 
       {:error, :not_found} ->
+        Logger.debug(
+          "removeDownloadResult called for unknown gid=#{gid} (already removed or never existed)"
+        )
+
         {:ok, "OK"}
     end
   end
@@ -509,13 +517,7 @@ defmodule Aria2Api.Handlers.Downloads do
   end
 
   @doc """
-  Filters torrents to only those belonging to the specified servarr instance.
-
-  Fetches the Servarr's grabbed history and only returns torrents whose hash appears
-  in that history. This is more reliable than URL matching since infohashes are consistent
-  across different network configurations.
-
-  History responses are cached per Servarr instance to avoid hammering the API.
+  Filters torrents by Servarr instance using grabbed history infohash matching.
   """
   def filter_by_servarr(_torrents, nil) do
     Logger.error("No Servarr credentials provided - this is required for multi-tenant security")
@@ -523,7 +525,9 @@ defmodule Aria2Api.Handlers.Downloads do
   end
 
   def filter_by_servarr(torrents, {servarr_url, servarr_api_key}) do
-    case get_servarr_grabbed_hashes(servarr_url, servarr_api_key) do
+    client = ServarrClient.new(servarr_url, servarr_api_key)
+
+    case ServarrClient.get_grabbed_download_ids(client) do
       {:ok, grabbed_hashes} ->
         filtered =
           Enum.filter(torrents, fn torrent ->
@@ -543,69 +547,5 @@ defmodule Aria2Api.Handlers.Downloads do
 
         []
     end
-  end
-
-  @doc """
-  Fetches infohashes from Servarr's grabbed history with ETS caching.
-  Cache TTL configurable via SERVARR_HISTORY_CACHE_TTL (default: 30 seconds).
-  """
-  def get_servarr_grabbed_hashes(servarr_url, servarr_api_key) do
-    cache_key = {servarr_url, servarr_api_key}
-    ttl_ms = Aria2Debrid.Config.servarr_history_cache_ttl() * 1000
-
-    case lookup_cache(cache_key) do
-      {:ok, grabbed_hashes} ->
-        {:ok, grabbed_hashes}
-
-      :miss ->
-        client = ServarrClient.new(servarr_url, servarr_api_key)
-        max_items = Aria2Debrid.Config.servarr_history_page_size()
-
-        case ServarrClient.get_grabbed_download_ids(client, max_items: max_items) do
-          {:ok, grabbed_hashes} ->
-            store_cache(cache_key, grabbed_hashes, ttl_ms)
-            {:ok, grabbed_hashes}
-
-          {:error, reason} ->
-            {:error, reason}
-        end
-    end
-  end
-
-  # ETS cache for Servarr history responses
-  @cache_table :servarr_history_cache
-
-  defp ensure_cache_table do
-    case :ets.whereis(@cache_table) do
-      :undefined ->
-        :ets.new(@cache_table, [:set, :public, :named_table, read_concurrency: true])
-
-      _tid ->
-        :ok
-    end
-  end
-
-  defp lookup_cache(key) do
-    ensure_cache_table()
-
-    case :ets.lookup(@cache_table, key) do
-      [{^key, value, expires_at}] ->
-        if System.monotonic_time(:millisecond) < expires_at do
-          {:ok, value}
-        else
-          :ets.delete(@cache_table, key)
-          :miss
-        end
-
-      [] ->
-        :miss
-    end
-  end
-
-  defp store_cache(key, value, ttl_ms) do
-    ensure_cache_table()
-    expires_at = System.monotonic_time(:millisecond) + ttl_ms
-    :ets.insert(@cache_table, {key, value, expires_at})
-    :ok
   end
 end

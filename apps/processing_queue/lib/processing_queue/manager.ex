@@ -77,34 +77,61 @@ defmodule ProcessingQueue.Manager do
       {:ok, hash} ->
         hash = String.downcase(hash)
 
-        if Map.has_key?(state.torrents, hash) do
-          {:reply, {:error, :already_exists}, state}
-        else
-          torrent = Torrent.new(hash, magnet)
-          torrent = apply_opts(torrent, opts)
+        case Map.get(state.torrents, hash) do
+          nil ->
+            # Torrent doesn't exist, add it
+            add_new_torrent(magnet, hash, opts, state)
 
-          Logger.debug("Adding torrent #{hash} to Real Debrid")
-          client = get_rd_client()
+          %Torrent{state: torrent_state} when torrent_state in [:success, :failed] ->
+            # Torrent exists but is in terminal state, remove and re-add
+            Logger.info(
+              "Torrent #{hash} already exists in #{torrent_state} state, removing and re-adding"
+            )
 
-          case RealDebrid.Api.AddMagnet.add(client, magnet) do
-            {:ok, response} ->
-              rd_id = response.id
-              torrent = %{torrent | rd_id: rd_id}
-              torrent = Torrent.transition(torrent, :waiting_metadata)
+            stop_processor(hash)
+            unregister_gid(hash)
 
-              start_processor(torrent)
+            # Remove old torrent from state
+            new_state = %{state | torrents: Map.delete(state.torrents, hash)}
 
-              new_state = put_in(state.torrents[hash], torrent)
-              Logger.info("Added torrent #{hash} to processing queue with RD ID #{rd_id}")
-              {:reply, {:ok, hash}, new_state}
+            # Add new torrent
+            add_new_torrent(magnet, hash, opts, new_state)
 
-            {:error, reason} ->
-              Logger.error("Failed to add torrent #{hash} to Real Debrid: #{inspect(reason)}")
-              {:reply, {:error, reason}, state}
-          end
+          %Torrent{state: torrent_state} ->
+            # Torrent exists and is still processing
+            Logger.warning(
+              "Torrent #{hash} already exists in #{torrent_state} state, rejecting duplicate"
+            )
+
+            {:reply, {:error, :already_exists}, state}
         end
 
       {:error, reason} ->
+        {:reply, {:error, reason}, state}
+    end
+  end
+
+  defp add_new_torrent(magnet, hash, opts, state) do
+    torrent = Torrent.new(hash, magnet)
+    torrent = apply_opts(torrent, opts)
+
+    Logger.debug("Adding torrent #{hash} to Real Debrid")
+    client = get_rd_client()
+
+    case RealDebrid.Api.AddMagnet.add(client, magnet) do
+      {:ok, response} ->
+        rd_id = response.id
+        torrent = %{torrent | rd_id: rd_id}
+        torrent = Torrent.transition(torrent, :waiting_metadata)
+
+        start_processor(torrent)
+
+        new_state = put_in(state.torrents[hash], torrent)
+        Logger.info("Added torrent #{hash} to processing queue with RD ID #{rd_id}")
+        {:reply, {:ok, hash}, new_state}
+
+      {:error, reason} ->
+        Logger.error("Failed to add torrent #{hash} to Real Debrid: #{inspect(reason)}")
         {:reply, {:error, reason}, state}
     end
   end
@@ -115,39 +142,64 @@ defmodule ProcessingQueue.Manager do
       {:ok, hash} ->
         hash = String.downcase(hash)
 
-        if Map.has_key?(state.torrents, hash) do
-          {:reply, {:error, :already_exists}, state}
-        else
-          magnet = "magnet:?xt=urn:btih:#{hash}"
-          torrent = Torrent.new(hash, magnet)
-          torrent = apply_opts(torrent, opts)
+        case Map.get(state.torrents, hash) do
+          nil ->
+            # Torrent doesn't exist, add it
+            add_new_torrent_file(torrent_data, hash, opts, state)
 
-          Logger.debug("Adding torrent file #{hash} to Real Debrid")
-          client = get_rd_client()
+          %Torrent{state: torrent_state} when torrent_state in [:success, :failed] ->
+            # Torrent exists but is in terminal state, remove and re-add
+            Logger.info(
+              "Torrent file #{hash} already exists in #{torrent_state} state, removing and re-adding"
+            )
 
-          case RealDebrid.Api.AddTorrent.add(client, torrent_data) do
-            {:ok, response} ->
-              rd_id = response.id
-              torrent = %{torrent | rd_id: rd_id}
-              torrent = Torrent.transition(torrent, :waiting_metadata)
+            stop_processor(hash)
+            unregister_gid(hash)
 
-              start_processor(torrent)
+            # Remove old torrent from state
+            new_state = %{state | torrents: Map.delete(state.torrents, hash)}
 
-              new_state = put_in(state.torrents[hash], torrent)
-              Logger.info("Added torrent file #{hash} to processing queue with RD ID #{rd_id}")
-              {:reply, {:ok, hash}, new_state}
+            # Add new torrent
+            add_new_torrent_file(torrent_data, hash, opts, new_state)
 
-            {:error, reason} ->
-              Logger.error(
-                "Failed to add torrent file #{hash} to Real Debrid: #{inspect(reason)}"
-              )
+          %Torrent{state: torrent_state} ->
+            # Torrent exists and is still processing
+            Logger.warning(
+              "Torrent file #{hash} already exists in #{torrent_state} state, rejecting duplicate"
+            )
 
-              {:reply, {:error, reason}, state}
-          end
+            {:reply, {:error, :already_exists}, state}
         end
 
       {:error, reason} ->
         Logger.error("Failed to extract infohash from torrent file: #{inspect(reason)}")
+        {:reply, {:error, reason}, state}
+    end
+  end
+
+  defp add_new_torrent_file(torrent_data, hash, opts, state) do
+    magnet = "magnet:?xt=urn:btih:#{hash}"
+    torrent = Torrent.new(hash, magnet)
+    torrent = apply_opts(torrent, opts)
+
+    Logger.debug("Adding torrent file #{hash} to Real Debrid")
+    client = get_rd_client()
+
+    case RealDebrid.Api.AddTorrent.add(client, torrent_data) do
+      {:ok, response} ->
+        rd_id = response.id
+        torrent = %{torrent | rd_id: rd_id}
+        torrent = Torrent.transition(torrent, :waiting_metadata)
+
+        start_processor(torrent)
+
+        new_state = put_in(state.torrents[hash], torrent)
+        Logger.info("Added torrent file #{hash} to processing queue with RD ID #{rd_id}")
+        {:reply, {:ok, hash}, new_state}
+
+      {:error, reason} ->
+        Logger.error("Failed to add torrent file #{hash} to Real Debrid: #{inspect(reason)}")
+
         {:reply, {:error, reason}, state}
     end
   end

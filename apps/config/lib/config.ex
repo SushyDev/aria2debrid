@@ -265,22 +265,6 @@ defmodule Aria2Debrid.Config do
     get_env(:servarr_client, :search_on_failure, true)
   end
 
-  @doc """
-  Number of history items to fetch from Servarr for multi-tenant filtering.
-  """
-  @spec servarr_history_page_size() :: pos_integer()
-  def servarr_history_page_size do
-    get_env(:servarr_client, :history_page_size, 1000)
-  end
-
-  @doc """
-  Cache TTL for Servarr history responses (seconds).
-  """
-  @spec servarr_history_cache_ttl() :: pos_integer()
-  def servarr_history_cache_ttl do
-    get_env(:servarr_client, :history_cache_ttl, 30)
-  end
-
   defp get_env(app, key, default \\ nil) do
     Application.get_env(app, key, default)
   end

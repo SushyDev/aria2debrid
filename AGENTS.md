@@ -108,12 +108,6 @@ The SecretToken is parsed directly as `url|api_key` format. The pipe character `
 - **Invalid secret format**: Returns empty list (enforces multi-tenant security)
 - **History API call fails**: Returns empty list + error log (prevents cross-contamination)
 
-**Cache Strategy**:
-- History responses cached per Servarr instance (default: 30 seconds TTL)
-- Configurable via `SERVARR_HISTORY_CACHE_TTL` env var (seconds)
-- Page size configurable via `SERVARR_HISTORY_PAGE_SIZE` (default: 1000)
-- ETS-based caching prevents excessive API calls during frequent status polls
-
 **Key Points**:
 - Credentials passed directly in SecretToken field as `url|api_key`
 - Each Servarr instance uses unique credentials in their SecretToken
@@ -122,6 +116,7 @@ The SecretToken is parsed directly as `url|api_key` format. The pipe character `
 - Prevents Sonarr from seeing Radarr's downloads and vice versa (via infohash filtering)
 - Handles complex networking (internal/external, docker, proxies, etc.)
 - **REQUIRED**: SecretToken must be configured, otherwise returns empty list (no downloads visible)
+- Uses `/api/v3/history/since?eventType=grabbed` endpoint (simple, no pagination needed)
 
 ### 5. Torrent Completion Requirements
 **Critical Decision**:

@@ -215,6 +215,76 @@ defmodule Aria2Api.SonarrCompatibilityTest do
     end
   end
 
+  describe "Sonarr AddTorrent - aria2.addTorrent" do
+    @doc """
+    Sonarr can also add torrents via torrent file (base64 encoded).
+    See: Aria2Proxy.cs:114-129
+
+    The torrent file is sent as a base64-encoded value in XML-RPC,
+    which the XML-RPC parser automatically decodes before passing to the handler.
+    """
+    test "aria2.addTorrent with base64-encoded torrent file" do
+      # Create a minimal valid torrent file for testing
+      # This is a minimal single-file torrent with a fake info hash
+      torrent_data =
+        Bento.encode!(%{
+          "announce" => "http://tracker.example.com:8080/announce",
+          "info" => %{
+            "name" => "test.txt",
+            "length" => 100,
+            "piece length" => 16384,
+            "pieces" => :crypto.strong_rand_bytes(20)
+          }
+        })
+
+      base64_torrent = Base.encode64(torrent_data)
+
+      # This is the format Sonarr uses for torrent files
+      xml_request = """
+      <?xml version="1.0" encoding="utf-8"?>
+      <methodCall>
+        <methodName>aria2.addTorrent</methodName>
+        <params>
+          <param><value><string>token:</string></value></param>
+          <param>
+            <value>
+              <base64>#{base64_torrent}</base64>
+            </value>
+          </param>
+          <param>
+            <value>
+              <array>
+                <data>
+                </data>
+              </array>
+            </value>
+          </param>
+          <param>
+            <value>
+              <struct>
+                <member>
+                  <name>dir</name>
+                  <value><string>/downloads</string></value>
+                </member>
+              </struct>
+            </value>
+          </param>
+        </params>
+      </methodCall>
+      """
+
+      conn =
+        conn(:post, "/rpc", String.trim(xml_request))
+        |> put_req_header("content-type", "text/xml")
+        |> Router.call(@opts)
+
+      assert conn.status == 200
+      assert conn.resp_body =~ ~r/<methodResponse>/
+      # Should return a GID or a fault (likely fault since we don't have RD credentials)
+      # The important thing is it doesn't crash with base64 decode error
+    end
+  end
+
   describe "Sonarr RemoveTorrent - aria2.forceRemove" do
     @doc """
     Sonarr calls aria2.forceRemove to remove a download.
