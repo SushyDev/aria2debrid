@@ -66,5 +66,7 @@ if config_env() in [:dev, :prod] do
   config :servarr_client,
     notify_on_failure: System.get_env("NOTIFY_SERVARR_ON_FAILURE") == "true",
     blocklist_on_failure: System.get_env("BLOCKLIST_ON_FAILURE") == "true",
-    search_on_failure: System.get_env("SEARCH_ON_FAILURE") == "true"
+    search_on_failure: System.get_env("SEARCH_ON_FAILURE") == "true",
+    history_page_size: String.to_integer(System.get_env("SERVARR_HISTORY_PAGE_SIZE") || "1000"),
+    history_cache_ttl: String.to_integer(System.get_env("SERVARR_HISTORY_CACHE_TTL") || "30")
 end
