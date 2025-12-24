@@ -302,60 +302,30 @@ defmodule ProcessingQueue.Processor do
            )}
 
         true ->
-          # Trigger Servarr to refresh its monitored downloads and wait for it to complete
-          # This ensures Sonarr's queue is updated with this download before we query it
-          Logger.debug("Triggering RefreshMonitoredDownloads and waiting for #{torrent.hash}")
+          # On first attempt or retry, trigger Servarr to refresh
+          # On retries after first, we just wait and retry the queue fetch
+          if torrent.retry_count == 0 do
+            # First attempt - trigger refresh and wait
+            Logger.debug("Triggering RefreshMonitoredDownloads and waiting for #{torrent.hash}")
 
-          case trigger_servarr_refresh_and_wait(torrent) do
-            :ok ->
-              # Now fetch expected file count from Servarr queue
-              case fetch_expected_files_from_servarr(torrent) do
-                {:ok, updated} ->
-                  {:ok, Torrent.transition(updated, :waiting_download)}
+            case trigger_servarr_refresh_and_wait(torrent) do
+              :ok ->
+                handle_queue_fetch(torrent)
 
-                {:error, :queue_empty} ->
-                  # Queue is empty - this is a warning (may be timing issue)
-                  reason = "Queue empty in Servarr after refresh - cannot validate file count"
+              {:error, reason} ->
+                Logger.warning(
+                  "Failed to trigger Servarr refresh for #{torrent.hash}: #{inspect(reason)} - fetching queue anyway"
+                )
 
-                  {:error, reason,
-                   Torrent.set_warning_error(
-                     torrent,
-                     "Servarr queue empty - add may be delayed or manual"
-                   )}
+                handle_queue_fetch(torrent)
+            end
+          else
+            # Retry attempt - just fetch queue again (no need to re-trigger refresh)
+            Logger.debug(
+              "Retry attempt #{torrent.retry_count} for #{torrent.hash}, fetching queue..."
+            )
 
-                {:error, reason} ->
-                  # API/network error fetching queue
-                  error_msg = "Failed to fetch Servarr queue: #{inspect(reason)}"
-
-                  {:error, error_msg,
-                   Torrent.set_warning_error(torrent, "Servarr API error: #{inspect(reason)}")}
-              end
-
-            {:error, reason} ->
-              Logger.warning(
-                "Failed to trigger Servarr refresh for #{torrent.hash}: #{inspect(reason)} - fetching queue anyway"
-              )
-
-              # Try fetching queue anyway
-              case fetch_expected_files_from_servarr(torrent) do
-                {:ok, updated} ->
-                  {:ok, Torrent.transition(updated, :waiting_download)}
-
-                {:error, :queue_empty} ->
-                  reason = "Queue empty in Servarr - cannot validate file count"
-
-                  {:error, reason,
-                   Torrent.set_warning_error(
-                     torrent,
-                     "Servarr queue empty - add may be delayed or manual"
-                   )}
-
-                {:error, reason} ->
-                  error_msg = "Failed to fetch Servarr queue: #{inspect(reason)}"
-
-                  {:error, error_msg,
-                   Torrent.set_warning_error(torrent, "Servarr API error: #{inspect(reason)}")}
-              end
+            handle_queue_fetch(torrent)
           end
       end
     else
@@ -725,6 +695,46 @@ defmodule ProcessingQueue.Processor do
 
   # Fetches expected file count from Servarr using credentials stored in torrent
   # For season packs, multiple queue items share the same download_id (one per episode)
+  # Helper function to handle queue fetch with retry logic
+  defp handle_queue_fetch(torrent) do
+    max_retries = 5
+
+    case fetch_expected_files_from_servarr(torrent) do
+      {:ok, updated} ->
+        # Success - reset retry count and transition
+        updated = %{updated | retry_count: 0}
+        {:ok, Torrent.transition(updated, :waiting_download)}
+
+      {:error, :queue_empty} ->
+        # Queue is empty - retry a few times as this may be a timing issue
+        if torrent.retry_count < max_retries do
+          Logger.warning(
+            "Queue empty for #{torrent.hash}, will retry in 3s (attempt #{torrent.retry_count + 1}/#{max_retries})"
+          )
+
+          updated = %{torrent | retry_count: torrent.retry_count + 1}
+          {:wait, 3000, updated}
+        else
+          # After max retries, fail with warning error
+          reason =
+            "Queue empty in Servarr after #{max_retries} retries - cannot validate file count"
+
+          {:error, reason,
+           Torrent.set_warning_error(
+             torrent,
+             "Servarr queue empty after retries - may be manual add or already imported"
+           )}
+        end
+
+      {:error, reason} ->
+        # API/network error fetching queue
+        error_msg = "Failed to fetch Servarr queue: #{inspect(reason)}"
+
+        {:error, error_msg,
+         Torrent.set_warning_error(torrent, "Servarr API error: #{inspect(reason)}")}
+    end
+  end
+
   defp fetch_expected_files_from_servarr(torrent) do
     client = ServarrClient.new(torrent.servarr_url, torrent.servarr_api_key)
 
