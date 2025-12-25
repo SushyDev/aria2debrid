@@ -123,9 +123,24 @@ defmodule Aria2Api.Handlers.Downloads do
 
   def tell_status(_), do: {:error, -32602, "Invalid params"}
 
+  # States that map to aria2 status="active"
+  @active_states [:waiting_download, :validating_count, :validating_media, :validating_path]
+
+  # States that map to aria2 status="waiting"
+  @waiting_states [
+    :pending,
+    :adding_rd,
+    :waiting_metadata,
+    :selecting_files,
+    :refreshing_info,
+    :fetching_queue
+  ]
+
   @doc """
   Handles aria2.tellActive - List active downloads.
 
+  Returns torrents that map to aria2 status="active" (downloading/validating states).
+  Also includes warning failures which appear as stalled active downloads.
   Filters by Servarr instance using grabbed history (infohash matching).
   Returns empty list if no credentials provided.
   """
@@ -133,11 +148,17 @@ defmodule Aria2Api.Handlers.Downloads do
     keys = List.first(params) || []
 
     all_torrents = ProcessingQueue.list_torrents()
-    processing_torrents = Enum.filter(all_torrents, &Torrent.processing?/1)
-    filtered_torrents = filter_by_servarr(processing_torrents, servarr_credentials)
+
+    # Include active states AND warning failures (which report as status="active")
+    active_torrents =
+      Enum.filter(all_torrents, fn t ->
+        t.state in @active_states or (t.state == :failed and t.failure_type == :warning)
+      end)
+
+    filtered_torrents = filter_by_servarr(active_torrents, servarr_credentials)
 
     Logger.debug(
-      "tellActive: #{length(all_torrents)} total, #{length(processing_torrents)} processing, #{length(filtered_torrents)} after filtering"
+      "tellActive: #{length(all_torrents)} total, #{length(active_torrents)} active/warning, #{length(filtered_torrents)} after filtering"
     )
 
     downloads =
@@ -159,6 +180,7 @@ defmodule Aria2Api.Handlers.Downloads do
   @doc """
   Handles aria2.tellWaiting - List waiting downloads.
 
+  Returns torrents that map to aria2 status="waiting" (queued/pending states).
   Filters by Servarr instance using grabbed history (infohash matching).
   Returns empty list if no credentials provided.
   """
@@ -167,9 +189,13 @@ defmodule Aria2Api.Handlers.Downloads do
 
     waiting_torrents =
       ProcessingQueue.list_torrents()
-      |> Enum.filter(fn t -> t.state == :pending end)
+      |> Enum.filter(fn t -> t.state in @waiting_states end)
 
     filtered_torrents = filter_by_servarr(waiting_torrents, servarr_credentials)
+
+    Logger.debug(
+      "tellWaiting: #{length(waiting_torrents)} waiting, #{length(filtered_torrents)} after filtering (offset=#{offset}, num=#{num})"
+    )
 
     downloads =
       filtered_torrents
@@ -187,6 +213,8 @@ defmodule Aria2Api.Handlers.Downloads do
   @doc """
   Handles aria2.tellStopped - List stopped downloads.
 
+  Returns torrents that map to aria2 status="complete" or status="error".
+  Warning failures are excluded (they appear in tellActive as stalled).
   Filters by Servarr instance using grabbed history (infohash matching).
   Returns empty list if no credentials provided.
   """
@@ -194,7 +222,13 @@ defmodule Aria2Api.Handlers.Downloads do
     {offset, num, keys} = parse_pagination_params(params)
 
     all_torrents = ProcessingQueue.list_torrents()
-    stopped_torrents = Enum.filter(all_torrents, fn t -> t.state in [:success, :failed] end)
+
+    # Include success and failed states, but exclude warning failures (they go to tellActive)
+    stopped_torrents =
+      Enum.filter(all_torrents, fn t ->
+        t.state == :success or (t.state == :failed and t.failure_type != :warning)
+      end)
+
     filtered_torrents = filter_by_servarr(stopped_torrents, servarr_credentials)
 
     Logger.debug(
@@ -209,9 +243,15 @@ defmodule Aria2Api.Handlers.Downloads do
         gid = get_or_create_gid(torrent.hash)
         status = torrent_to_aria2(torrent, gid)
 
-        Logger.debug(
-          "tellStopped: #{torrent.hash} state=#{torrent.state} -> aria2_status=#{status["status"]}"
-        )
+        if status["status"] == "error" do
+          Logger.debug(
+            "tellStopped: #{torrent.hash} state=#{torrent.state} failure_type=#{torrent.failure_type} -> aria2_status=#{status["status"]} errorCode=#{status["errorCode"]}"
+          )
+        else
+          Logger.debug(
+            "tellStopped: #{torrent.hash} state=#{torrent.state} -> aria2_status=#{status["status"]}"
+          )
+        end
 
         filter_keys(status, keys)
       end)
@@ -391,6 +431,10 @@ defmodule Aria2Api.Handlers.Downloads do
     }
 
     if status == "error" do
+      Logger.debug(
+        "torrent_to_aria2: #{torrent.hash} failure_type=#{inspect(torrent.failure_type)} -> errorCode=#{error_code}"
+      )
+
       base
       |> Map.put("errorCode", to_string(error_code))
       |> Map.put("errorMessage", error_message)

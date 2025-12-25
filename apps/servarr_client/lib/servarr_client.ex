@@ -155,6 +155,10 @@ defmodule ServarrClient do
 
   Returns a list of grabbed events because season packs can have multiple history records
   (one per episode). Only returns 'grabbed' events for counting expected files.
+
+  **Important:** This deduplicates by episode_id (Sonarr) or movie_id (Radarr) to handle
+  re-grabs of the same content. Each unique episode/movie counts once, regardless of
+  how many times it was grabbed.
   """
   @spec get_history_items_by_download_id(client(), String.t()) ::
           {:ok, [HistoryItem.t()]} | error()
@@ -167,12 +171,24 @@ defmodule ServarrClient do
             String.downcase(item.download_id || "") == String.downcase(download_id) and
               HistoryItem.grabbed?(item)
           end)
+          |> deduplicate_history_items()
 
         {:ok, matching}
 
       {:error, reason} ->
         {:error, reason}
     end
+  end
+
+  # Deduplicates history items by episode_id (Sonarr) or movie_id (Radarr).
+  # This handles re-grabs of the same content - each episode/movie counts once.
+  defp deduplicate_history_items(items) do
+    items
+    |> Enum.uniq_by(fn item ->
+      # For Sonarr: use episode_id, for Radarr: use movie_id
+      # If neither is present (shouldn't happen), use the history item id as fallback
+      item.episode_id || item.movie_id || item.id
+    end)
   end
 
   @doc """

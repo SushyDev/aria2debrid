@@ -1,17 +1,48 @@
 defmodule ProcessingQueue.Processor do
   @moduledoc """
-  Processes a single torrent through the state machine.
+  Processes a single torrent through the FSM state machine.
 
-  State machine flow:
-  PENDING → ADDING_RD → WAITING_METADATA → SELECTING_FILES → WAITING_DOWNLOAD →
-  VALIDATING_COUNT → VALIDATING_MEDIA → VALIDATING_PATH → SUCCESS/FAILED
+  ## State Flow
+
+  ```
+  pending → adding_rd → waiting_metadata → selecting_files → refreshing_info
+  → fetching_queue → waiting_download → validating_count → validating_media
+  → validating_path → success/failed
+  ```
+
+  ## State Responsibilities
+
+  Each state has a single responsibility:
+  - `:pending` - Initial state, transitions to adding_rd
+  - `:adding_rd` - Adds magnet/torrent to Real-Debrid
+  - `:waiting_metadata` - Polls RD until files are available
+  - `:selecting_files` - Selects video/subtitle files on RD
+  - `:refreshing_info` - Refreshes RD info after file selection
+  - `:fetching_queue` - Fetches expected file count from Servarr history
+  - `:waiting_download` - Waits for RD to complete download (if required)
+  - `:validating_count` - Validates file count matches expected
+  - `:validating_media` - Validates media via FFprobe
+  - `:validating_path` - Validates files exist on filesystem
+  - `:success` - Terminal success state
+  - `:failed` - Terminal failure state
   """
 
   use GenServer, restart: :temporary
 
-  alias ProcessingQueue.{Torrent, Manager}
+  alias ProcessingQueue.{
+    ErrorClassifier,
+    FailureHandler,
+    FileSelector,
+    Manager,
+    RDPoller,
+    ServarrSync,
+    Torrent,
+    ValidationPipeline
+  }
 
   require Logger
+
+  # Client API
 
   def start_link(%Torrent{} = torrent) do
     GenServer.start_link(__MODULE__, torrent, name: via_tuple(torrent.hash))
@@ -33,505 +64,463 @@ defmodule ProcessingQueue.Processor do
   def handle_info(:process, torrent) do
     case process_state(torrent) do
       {:ok, updated_torrent} ->
-        Manager.update_torrent(updated_torrent)
-
-        if Torrent.processing?(updated_torrent) do
-          send(self(), :process)
-          {:noreply, updated_torrent}
-        else
-          Logger.info("Torrent #{torrent.hash} reached terminal state: #{updated_torrent.state}")
-
-          trigger_servarr_refresh(updated_torrent)
-
-          if updated_torrent.state == :failed and updated_torrent.rd_id do
-            if updated_torrent.failure_type == :validation do
-              Logger.info(
-                "Torrent #{updated_torrent.hash} failed validation, keeping in RD for Servarr to see error (RD ID: #{updated_torrent.rd_id})"
-              )
-            else
-              Logger.debug(
-                "Torrent #{updated_torrent.hash} in :failed terminal state with RD ID #{updated_torrent.rd_id}, triggering cleanup"
-              )
-
-              cleanup_real_debrid_on_failure(updated_torrent)
-            end
-          else
-            if updated_torrent.state == :failed do
-              Logger.debug(
-                "Torrent #{updated_torrent.hash} in :failed state but no RD ID to cleanup"
-              )
-            end
-          end
-
-          {:stop, :normal, updated_torrent}
-        end
+        handle_state_result(updated_torrent)
 
       {:error, reason, updated_torrent} ->
-        Manager.update_torrent(updated_torrent)
-        Logger.error("Torrent #{torrent.hash} failed: #{reason}")
-
-        trigger_servarr_refresh(updated_torrent)
-
-        if updated_torrent.failure_type == :validation do
-          Logger.info(
-            "Torrent #{updated_torrent.hash} failed validation, keeping in RD for Servarr to see error (RD ID: #{updated_torrent.rd_id})"
-          )
-        else
-          # For non-validation failures (e.g., warnings, RD errors), cleanup immediately
-          if updated_torrent.rd_id do
-            Logger.debug(
-              "Torrent #{updated_torrent.hash} failed with RD ID #{updated_torrent.rd_id}, triggering cleanup"
-            )
-
-            cleanup_real_debrid_on_failure(updated_torrent)
-          else
-            Logger.debug("Torrent #{updated_torrent.hash} failed but no RD ID to cleanup")
-          end
-        end
-
-        {:stop, :normal, updated_torrent}
+        handle_error_result(reason, updated_torrent)
 
       {:wait, delay, updated_torrent} ->
-        Manager.update_torrent(updated_torrent)
-        Process.send_after(self(), :process, delay)
-        {:noreply, updated_torrent}
+        handle_wait_result(delay, updated_torrent)
     end
   end
 
-  # State machine processing
+  # Result handlers
 
+  defp handle_state_result(torrent) do
+    Manager.update_torrent(torrent)
+
+    if Torrent.processing?(torrent) do
+      send(self(), :process)
+      {:noreply, torrent}
+    else
+      handle_terminal_state(torrent)
+    end
+  end
+
+  defp handle_error_result(reason, torrent) do
+    Manager.update_torrent(torrent)
+    Logger.error("[#{torrent.hash}] Failed: #{reason}")
+
+    handle_terminal_state(torrent)
+  end
+
+  defp handle_wait_result(delay, torrent) do
+    Manager.update_torrent(torrent)
+    Process.send_after(self(), :process, delay)
+    {:noreply, torrent}
+  end
+
+  defp handle_terminal_state(torrent) do
+    Logger.info("[#{torrent.hash}] Reached terminal state: #{torrent.state}")
+
+    # Trigger Servarr refresh so it sees the updated status
+    trigger_servarr_refresh(torrent)
+
+    # Handle RD cleanup based on failure type
+    if torrent.state == :failed and torrent.rd_id do
+      handle_failure_cleanup(torrent)
+    end
+
+    {:stop, :normal, torrent}
+  end
+
+  defp handle_failure_cleanup(torrent) do
+    if ErrorClassifier.cleanup_rd?(torrent.failure_type) do
+      Logger.debug("[#{torrent.hash}] Cleaning up RD torrent: #{torrent.rd_id}")
+      cleanup_real_debrid(torrent)
+    else
+      Logger.info(
+        "[#{torrent.hash}] Keeping RD torrent for #{torrent.failure_type} failure (RD ID: #{torrent.rd_id})"
+      )
+    end
+  end
+
+  # ============================================================================
+  # State Machine Processing
+  # ============================================================================
+
+  # State: PENDING
+  # Initial state - should not normally reach here as torrents start in adding_rd
   defp process_state(%Torrent{state: :pending} = torrent) do
-    # Should not reach here - torrents are added directly to waiting_metadata
-    # after RD add completes in Manager
-    Logger.warning(
-      "Torrent #{torrent.hash} in unexpected :pending state, transitioning to adding_rd"
-    )
-
+    Logger.warning("[#{torrent.hash}] In unexpected :pending state, transitioning to adding_rd")
     {:ok, Torrent.transition(torrent, :adding_rd)}
   end
 
+  # State: ADDING_RD
+  # Adds the magnet/torrent to Real-Debrid (usually done in Manager, but handle if needed)
   defp process_state(%Torrent{state: :adding_rd} = torrent) do
-    # Should not reach here - RD add is now done synchronously in Manager
-    Logger.warning("Torrent #{torrent.hash} in unexpected :adding_rd state")
-
     if torrent.rd_id do
-      # Already has RD ID, just transition
       {:ok, Torrent.transition(torrent, :waiting_metadata)}
     else
-      # Need to add to RD
-      Logger.debug("Adding torrent #{torrent.hash} to Real Debrid")
-      client = get_rd_client()
-
-      case RealDebrid.Api.AddMagnet.add(client, torrent.magnet) do
-        {:ok, response} ->
-          rd_id = response.id
-          updated = %{torrent | rd_id: rd_id}
-          {:ok, Torrent.transition(updated, :waiting_metadata)}
-
-        {:error, reason} ->
-          {:error, "Failed to add to Real Debrid: #{inspect(reason)}",
-           Torrent.set_error(torrent, "RD add failed")}
-      end
+      add_to_real_debrid(torrent)
     end
   end
 
+  # State: WAITING_METADATA
+  # Polls RD until torrent metadata (files) is available
   defp process_state(%Torrent{state: :waiting_metadata} = torrent) do
-    Logger.debug("Waiting for metadata for torrent #{torrent.hash}")
+    Logger.debug("[#{torrent.hash}] Waiting for metadata")
 
     client = get_rd_client()
 
-    case RealDebrid.Api.TorrentInfo.get(client, torrent.rd_id) do
+    case RDPoller.get_torrent_info(client, torrent.rd_id) do
       {:ok, info} ->
-        Logger.debug("RD TorrentInfo.get response - ID: #{info.id}, Status: #{info.status}")
-        Logger.debug("RD TorrentInfo files count: #{length(info.files || [])}")
-
-        if Enum.any?(info.files) do
-          Enum.each(info.files, fn f ->
-            Logger.debug(
-              "RD file: path=#{f.path}, bytes=#{f.bytes}, selected=#{f.selected}, id=#{f.id}"
-            )
-          end)
-        else
-          Logger.warning("RD returned empty files array for torrent #{torrent.hash}")
-        end
-
-        # Convert to map format expected by update_rd_info
-        info_map = %{
-          "id" => info.id,
-          "filename" => info.filename,
-          "original_filename" => info.original_filename,
-          "files" =>
-            Enum.map(info.files, fn f ->
-              %{"id" => f.id, "path" => f.path, "bytes" => f.bytes, "selected" => f.selected}
-            end),
-          "bytes" => info.bytes,
-          "progress" => info.progress
-        }
-
-        updated = Torrent.update_rd_info(torrent, info_map)
-
-        case info.status do
-          "waiting_files_selection" ->
-            {:ok, Torrent.transition(updated, :selecting_files)}
-
-          "magnet_error" ->
-            {:error, "Magnet error", Torrent.set_error(updated, "Invalid magnet link")}
-
-          "error" ->
-            {:error, "RD error", Torrent.set_error(updated, "Real Debrid error")}
-
-          "dead" ->
-            {:error, "Dead torrent", Torrent.set_error(updated, "No seeders available")}
-
-          "downloaded" ->
-            {:ok, Torrent.transition(updated, :validating_count)}
-
-          other_status ->
-            # Not downloaded yet - behavior depends on require_downloaded? config
-            if Aria2Debrid.Config.require_downloaded?() do
-              # Use validation error so Sonarr/Radarr will auto-redownload
-              reason = "Torrent not downloaded on RD (status: #{other_status})"
-              notify_servarr_of_failure(updated, reason)
-
-              {:error, reason,
-               Torrent.set_validation_error(updated, "RD status: #{other_status}")}
-            else
-              Logger.info(
-                "Torrent #{torrent.hash} RD status is #{other_status}, proceeding (require_downloaded=false)"
-              )
-
-              {:ok, Torrent.transition(updated, :validating_count)}
-            end
-        end
+        handle_rd_status(torrent, info)
 
       {:error, reason} ->
-        Logger.warning("Failed to get torrent info: #{inspect(reason)}")
+        Logger.warning("[#{torrent.hash}] Failed to get torrent info: #{inspect(reason)}")
         {:wait, 5000, torrent}
     end
   end
 
+  # State: SELECTING_FILES
+  # Selects video and subtitle files on Real-Debrid
   defp process_state(%Torrent{state: :selecting_files} = torrent) do
-    Logger.debug("Selecting files for torrent #{torrent.hash}")
+    Logger.debug("[#{torrent.hash}] Selecting files")
 
     client = get_rd_client()
-    files = torrent.files || []
 
-    # If files haven't been populated yet, re-query torrent info from Real-Debrid
-    if Enum.empty?(files) do
-      Logger.debug(
-        "Files not yet available for #{torrent.hash}, re-querying torrent info from Real-Debrid"
-      )
-
-      # Re-query torrent info to get updated files list
-      case RealDebrid.Api.TorrentInfo.get(client, torrent.rd_id) do
-        {:ok, info} ->
-          Logger.debug("Re-queried torrent info, files count: #{length(info.files || [])}")
-
-          if Enum.empty?(info.files) do
-            Logger.debug("Files still not available for #{torrent.hash}, waiting for metadata")
-            {:wait, 2000, torrent}
-          else
-            # Update torrent with latest file info
-            info_map = %{
-              "id" => info.id,
-              "filename" => info.filename,
-              "original_filename" => info.original_filename,
-              "files" =>
-                Enum.map(info.files, fn f ->
-                  %{"id" => f.id, "path" => f.path, "bytes" => f.bytes, "selected" => f.selected}
-                end),
-              "bytes" => info.bytes,
-              "progress" => info.progress
-            }
-
-            updated = Torrent.update_rd_info(torrent, info_map)
-
-            # Process file selection with updated files
-            do_select_files(updated, client)
-          end
-
-        {:error, reason} ->
-          Logger.warning("Failed to re-query torrent info: #{inspect(reason)}")
-          {:wait, 2000, torrent}
-      end
+    if Enum.empty?(torrent.files || []) do
+      # Files not populated yet, re-query
+      refetch_and_select_files(torrent, client)
     else
       do_select_files(torrent, client)
     end
   end
 
+  # State: REFRESHING_INFO
+  # Refreshes torrent info after file selection to get updated selected status
   defp process_state(%Torrent{state: :refreshing_info} = torrent) do
-    Logger.debug("Refreshing torrent info after file selection for #{torrent.hash}")
+    Logger.debug("[#{torrent.hash}] Refreshing torrent info after file selection")
 
     client = get_rd_client()
 
-    case RealDebrid.Api.TorrentInfo.get(client, torrent.rd_id) do
+    case RDPoller.get_torrent_info(client, torrent.rd_id) do
       {:ok, info} ->
-        # Update files with new selected status
-        updated_files =
-          Enum.map(info.files, fn f ->
-            %{"id" => f.id, "path" => f.path, "bytes" => f.bytes, "selected" => f.selected}
-          end)
-
+        updated_files = convert_files_to_map(info.files)
         updated = %{torrent | files: updated_files, progress: info.progress}
         {:ok, Torrent.transition(updated, :fetching_queue)}
 
       {:error, reason} ->
-        Logger.warning("Failed to refresh torrent info: #{inspect(reason)}")
+        Logger.warning("[#{torrent.hash}] Failed to refresh torrent info: #{inspect(reason)}")
         {:wait, 2000, torrent}
     end
   end
 
+  # State: FETCHING_QUEUE
+  # Fetches expected file count from Servarr history
   defp process_state(%Torrent{state: :fetching_queue} = torrent) do
-    Logger.debug("Fetching queue info for torrent #{torrent.hash}")
+    Logger.debug("[#{torrent.hash}] Fetching queue info from Servarr")
 
     if Aria2Debrid.Config.validate_file_count?() do
-      # File count validation is enabled - we need Servarr credentials
-      cond do
-        is_nil(torrent.servarr_url) or torrent.servarr_url == "" ->
-          {:error, "File count validation enabled but no Servarr URL provided",
-           Torrent.set_warning_error(
-             torrent,
-             "Missing Servarr URL - configure download client directory"
-           )}
-
-        is_nil(torrent.servarr_api_key) or torrent.servarr_api_key == "" ->
-          {:error, "File count validation enabled but no Servarr API key provided",
-           Torrent.set_warning_error(
-             torrent,
-             "Missing Servarr API key - configure download client directory"
-           )}
-
-        true ->
-          # Fetch expected file count from Servarr history
-          # We don't need to trigger RefreshMonitoredDownloads because history API
-          # is populated immediately when Sonarr grabs the release (unlike queue API)
-          # On retries, we just re-fetch the history
-          Logger.debug("Fetching expected file count from Servarr history for #{torrent.hash}")
-          handle_queue_fetch(torrent)
-      end
+      fetch_expected_files_with_validation(torrent)
     else
-      # File count validation disabled - credentials are optional
-      # Still try to fetch expected_files if credentials are available (useful for logging)
-      updated =
-        if torrent.servarr_url && torrent.servarr_api_key do
-          trigger_servarr_refresh(torrent)
-          Process.sleep(2000)
-
-          case fetch_expected_files_from_servarr(torrent) do
-            {:ok, updated} ->
-              updated
-
-            {:error, _reason} ->
-              # Validation is disabled, so errors are not critical
-              Logger.debug(
-                "Could not fetch expected files for #{torrent.hash} (validation disabled, ignoring)"
-              )
-
-              torrent
-          end
-        else
-          Logger.debug("No Servarr credentials available, skipping queue fetch")
-          torrent
-        end
-
-      {:ok, Torrent.transition(updated, :waiting_download)}
+      fetch_expected_files_without_validation(torrent)
     end
   end
 
-  defp process_state(%Torrent{state: :validating_count} = torrent) do
-    Logger.debug("Validating file count for torrent #{torrent.hash}")
-
-    if Aria2Debrid.Config.validate_file_count?() do
-      # If expected_files is nil, validation is REQUIRED but we couldn't determine the expected count
-      # This should fail validation rather than defaulting to 1
-      if is_nil(torrent.expected_files) do
-        reason =
-          "Cannot validate file count: expected_files not set (queue may be empty or credentials missing)"
-
-        Logger.error("#{reason} for #{torrent.hash}")
-
-        # This is a warning error (not validation) because it's a system/timing issue, not a content issue
-        {:error, reason, Torrent.set_warning_error(torrent, reason)}
-      else
-        expected = torrent.expected_files
-
-        video_files =
-          (torrent.files || [])
-          |> Enum.filter(fn f -> f["selected"] == 1 end)
-          |> Enum.filter(&video_file?/1)
-          |> length()
-
-        if video_files >= expected do
-          {:ok, Torrent.transition(torrent, :validating_media)}
-        else
-          # File count mismatch triggers auto-redownload
-          reason = "File count mismatch: expected #{expected}, got #{video_files}"
-          notify_servarr_of_failure(torrent, reason)
-
-          {:error, reason, Torrent.set_validation_error(torrent, reason)}
-        end
-      end
-    else
-      {:ok, Torrent.transition(torrent, :validating_media)}
-    end
-  end
-
+  # State: WAITING_DOWNLOAD
+  # Waits for Real-Debrid to complete the download
   defp process_state(%Torrent{state: :waiting_download} = torrent) do
-    Logger.debug("Waiting for download completion on Real-Debrid for #{torrent.hash}")
+    Logger.debug("[#{torrent.hash}] Waiting for download completion on Real-Debrid")
 
     if Aria2Debrid.Config.require_downloaded?() do
-      client = get_rd_client()
-
-      case RealDebrid.Api.TorrentInfo.get(client, torrent.rd_id) do
-        {:ok, info} ->
-          case info.status do
-            "downloaded" ->
-              Logger.info("Torrent #{torrent.hash} downloaded on Real-Debrid")
-              {:ok, Torrent.transition(torrent, :validating_count)}
-
-            other_status ->
-              # require_downloaded? is true, so any non-downloaded status is a failure
-              # Use validation error so Sonarr/Radarr will auto-redownload
-              reason = "Torrent not downloaded on RD (status: #{other_status})"
-              notify_servarr_of_failure(torrent, reason)
-
-              {:error, reason,
-               Torrent.set_validation_error(torrent, "RD status: #{other_status}")}
-          end
-
-        {:error, reason} ->
-          Logger.warning("Failed to get torrent info: #{inspect(reason)}")
-          {:wait, 5000, torrent}
-      end
+      check_download_status(torrent)
     else
-      # Skip download verification, go straight to file count validation
       {:ok, Torrent.transition(torrent, :validating_count)}
     end
   end
 
-  defp process_state(%Torrent{state: :validating_media} = torrent) do
-    Logger.debug("Validating media for torrent #{torrent.hash}")
+  # State: VALIDATING_COUNT
+  # Validates that the file count matches expected
+  defp process_state(%Torrent{state: :validating_count} = torrent) do
+    Logger.debug("[#{torrent.hash}] Validating file count")
 
-    # Reset retry_count for next phases
-    # save_path is already set in Torrent.new
-    updated = %{torrent | retry_count: 0}
+    case ValidationPipeline.run_file_count(torrent) do
+      :ok ->
+        {:ok, Torrent.transition(torrent, :validating_media)}
 
-    if Aria2Debrid.Config.media_validation_enabled?() do
-      case validate_media_via_rd(updated) do
-        :ok ->
-          {:ok, Torrent.transition(updated, :validating_path)}
+      {:skip, reason} ->
+        Logger.debug("[#{torrent.hash}] File count validation skipped: #{reason}")
+        {:ok, Torrent.transition(torrent, :validating_media)}
 
-        {:error, reason} ->
-          # Media validation failures should trigger auto-redownload
-          notify_servarr_of_failure(updated, reason)
-          {:error, reason, Torrent.set_validation_error(updated, reason)}
-      end
-    else
-      {:ok, Torrent.transition(updated, :validating_path)}
+      {:error, reason} ->
+        handle_validation_failure(:file_count, reason, torrent)
     end
   end
 
+  # State: VALIDATING_MEDIA
+  # Validates media files via FFprobe
+  defp process_state(%Torrent{state: :validating_media} = torrent) do
+    Logger.debug("[#{torrent.hash}] Validating media")
+
+    # Reset retry count for next phase
+    updated = %{torrent | retry_count: 0}
+
+    case ValidationPipeline.run_media(updated) do
+      :ok ->
+        {:ok, Torrent.transition(updated, :validating_path)}
+
+      {:skip, reason} ->
+        Logger.debug("[#{torrent.hash}] Media validation skipped: #{reason}")
+        {:ok, Torrent.transition(updated, :validating_path)}
+
+      {:error, reason} ->
+        handle_validation_failure(:media, reason, updated)
+    end
+  end
+
+  # State: VALIDATING_PATH
+  # Validates that files exist on the filesystem (rclone mount)
   defp process_state(%Torrent{state: :validating_path} = torrent) do
-    Logger.debug("Validating path exists for torrent #{torrent.hash}")
+    Logger.debug("[#{torrent.hash}] Validating path exists")
 
     if Aria2Debrid.Config.validate_paths?() do
-      save_path = torrent.save_path
-      max_retries = Aria2Debrid.Config.path_validation_retries()
-
-      # Check if path exists AND contains files (not just empty directory)
-      if save_path && File.exists?(save_path) && path_has_files?(save_path) do
-        Logger.info("Path validated for torrent #{torrent.hash}: #{save_path}")
-        {:ok, Torrent.transition(torrent, :success)}
-      else
-        # Path doesn't exist yet or is empty - likely still syncing via rclone
-        if torrent.retry_count >= max_retries do
-          reason = "Path not found or empty after #{max_retries} retries: #{save_path}"
-
-          {:error, reason,
-           Torrent.set_validation_error(torrent, "Path validation timeout - file not available")}
-        else
-          Logger.debug(
-            "Path not ready yet for #{torrent.hash} (attempt #{torrent.retry_count + 1}/#{max_retries}): #{save_path}"
-          )
-
-          updated = %{torrent | retry_count: torrent.retry_count + 1}
-          {:wait, Aria2Debrid.Config.path_validation_delay(), updated}
-        end
-      end
+      validate_path_with_retry(torrent)
     else
-      # Path validation disabled, go straight to success
       {:ok, Torrent.transition(torrent, :success)}
     end
   end
 
+  # Terminal states
   defp process_state(%Torrent{state: terminal} = torrent) when terminal in [:success, :failed] do
-    # Already in terminal state
     {:ok, torrent}
   end
 
-  # Extracted file selection logic to avoid repeating the filtering and API call
-  # This helper is called from process_state(:selecting_files)
-  @doc false
+  # ============================================================================
+  # State Handler Helpers
+  # ============================================================================
+
+  defp add_to_real_debrid(torrent) do
+    Logger.debug("[#{torrent.hash}] Adding to Real-Debrid")
+    client = get_rd_client()
+
+    case RDPoller.add_magnet(client, torrent.magnet) do
+      {:ok, rd_id} ->
+        updated = %{torrent | rd_id: rd_id}
+        {:ok, Torrent.transition(updated, :waiting_metadata)}
+
+      {:error, reason} ->
+        failure =
+          FailureHandler.build_failure(:permanent, "Failed to add to RD: #{inspect(reason)}", %{})
+
+        {:error, inspect(reason), apply_failure(torrent, failure)}
+    end
+  end
+
+  defp handle_rd_status(torrent, info) do
+    info_map = RDPoller.info_to_map(info)
+    updated = Torrent.update_rd_info(torrent, info_map)
+
+    case RDPoller.check_status(info) do
+      {:ready, _} ->
+        {:ok, Torrent.transition(updated, :selecting_files)}
+
+      {:downloaded, _} ->
+        {:ok, Torrent.transition(updated, :validating_count)}
+
+      {:downloading, _} ->
+        handle_downloading_status(updated, info.status)
+
+      {:error, reason, _} ->
+        handle_rd_error(updated, reason)
+    end
+  end
+
+  defp handle_downloading_status(torrent, status) do
+    if Aria2Debrid.Config.require_downloaded?() do
+      reason = "Torrent not downloaded on RD (status: #{status})"
+      notify_servarr_of_failure(torrent, reason)
+      failure = FailureHandler.build_failure(:validation, reason, %{})
+      {:error, reason, apply_failure(torrent, failure)}
+    else
+      Logger.info(
+        "[#{torrent.hash}] RD status is #{status}, proceeding (require_downloaded=false)"
+      )
+
+      {:ok, Torrent.transition(torrent, :validating_count)}
+    end
+  end
+
+  defp handle_rd_error(torrent, reason) do
+    error_msg =
+      case reason do
+        :magnet_error -> "Invalid magnet link"
+        :rd_error -> "Real-Debrid error"
+        :dead_torrent -> "No seeders available"
+        _ -> "RD error: #{inspect(reason)}"
+      end
+
+    failure = FailureHandler.build_failure(:permanent, error_msg, %{})
+    {:error, error_msg, apply_failure(torrent, failure)}
+  end
+
+  defp refetch_and_select_files(torrent, client) do
+    Logger.debug("[#{torrent.hash}] Files not available, re-querying torrent info")
+
+    case RDPoller.get_torrent_info(client, torrent.rd_id) do
+      {:ok, info} ->
+        if Enum.empty?(info.files) do
+          Logger.debug("[#{torrent.hash}] Files still not available, waiting")
+          {:wait, 2000, torrent}
+        else
+          info_map = RDPoller.info_to_map(info)
+          updated = Torrent.update_rd_info(torrent, info_map)
+          do_select_files(updated, client)
+        end
+
+      {:error, reason} ->
+        Logger.warning("[#{torrent.hash}] Failed to re-query torrent info: #{inspect(reason)}")
+        {:wait, 2000, torrent}
+    end
+  end
+
   defp do_select_files(torrent, client) do
     files = torrent.files || []
+    selected_ids = FileSelector.select(files)
 
     Logger.debug(
-      "Found #{length(files)} files for #{torrent.hash}: #{inspect(Enum.map(files, & &1["path"]))}"
-    )
-
-    # Log file details for debugging
-    Enum.each(files, fn f ->
-      ext = Path.extname(f["path"]) |> String.trim_leading(".") |> String.downcase()
-      bytes = f["bytes"] || 0
-
-      Logger.debug(
-        "File check - path: #{f["path"]}, ext: #{ext}, bytes: #{bytes}, selected: #{f["selected"]}"
-      )
-    end)
-
-    Logger.debug(
-      "Config - streamable_extensions: #{inspect(Aria2Debrid.Config.streamable_extensions())}"
-    )
-
-    Logger.debug(
-      "Config - additional_selectable_files: #{inspect(Aria2Debrid.Config.additional_selectable_files())}"
-    )
-
-    Logger.debug("Config - min_file_size_bytes: #{Aria2Debrid.Config.min_file_size_bytes()}")
-    Logger.debug("Config - select_all?: #{Aria2Debrid.Config.select_all?()}")
-
-    # Select video files and configured additional files
-    selected_ids = select_files(files)
-
-    Logger.debug(
-      "Selected #{length(selected_ids)} file IDs for #{torrent.hash}: #{inspect(selected_ids)}"
+      "[#{torrent.hash}] Selected #{length(selected_ids)} files: #{inspect(selected_ids)}"
     )
 
     if Enum.empty?(selected_ids) do
-      Logger.error(
-        "No valid files to select for #{torrent.hash}. Files: #{inspect(Enum.map(files, fn f -> "#{f["path"]} (#{f["bytes"]} bytes)" end))}"
-      )
-
-      {:error, "No valid files to select", Torrent.set_error(torrent, "No video files found")}
+      # This is a validation failure - the torrent doesn't have valid video files
+      # Sonarr should trigger a re-search for a better release
+      notify_servarr_of_failure(torrent, "No valid video files in torrent")
+      failure = FailureHandler.build_failure(:validation, "No valid files to select", %{})
+      {:error, "No valid files to select", apply_failure(torrent, failure)}
     else
-      # Convert to comma-separated string for API
-      file_ids_string = Enum.join(selected_ids, ",")
-
-      case RealDebrid.Api.SelectFiles.select(client, torrent.rd_id, file_ids_string) do
+      case RDPoller.select_files(client, torrent.rd_id, selected_ids) do
         :ok ->
-          # After selecting files, we need to re-fetch torrent info to get updated file status
-          # The torrent.files still has old selected values, refresh them
           updated = %{torrent | selected_files: selected_ids}
           {:ok, Torrent.transition(updated, :refreshing_info)}
 
         {:error, reason} ->
-          {:error, "Failed to select files: #{inspect(reason)}",
-           Torrent.set_error(torrent, "File selection failed")}
+          failure =
+            FailureHandler.build_failure(
+              :permanent,
+              "File selection failed: #{inspect(reason)}",
+              %{}
+            )
+
+          {:error, "File selection failed", apply_failure(torrent, failure)}
       end
     end
   end
 
-  # Helper functions
+  defp fetch_expected_files_with_validation(torrent) do
+    cond do
+      missing_servarr_url?(torrent) ->
+        failure = FailureHandler.build_failure(:warning, "Missing Servarr URL", %{})
+
+        {:error, "File count validation enabled but no Servarr URL",
+         apply_failure(torrent, failure)}
+
+      missing_servarr_api_key?(torrent) ->
+        failure = FailureHandler.build_failure(:warning, "Missing Servarr API key", %{})
+
+        {:error, "File count validation enabled but no Servarr API key",
+         apply_failure(torrent, failure)}
+
+      true ->
+        handle_queue_fetch(torrent)
+    end
+  end
+
+  defp fetch_expected_files_without_validation(torrent) do
+    updated =
+      if torrent.servarr_url && torrent.servarr_api_key do
+        trigger_servarr_refresh(torrent)
+        Process.sleep(2000)
+
+        case ServarrSync.get_expected_file_count(
+               torrent.servarr_url,
+               torrent.servarr_api_key,
+               torrent.hash
+             ) do
+          {:ok, count} -> %{torrent | expected_files: count}
+          {:error, _} -> torrent
+        end
+      else
+        torrent
+      end
+
+    {:ok, Torrent.transition(updated, :waiting_download)}
+  end
+
+  defp handle_queue_fetch(torrent) do
+    case ServarrSync.get_expected_file_count(
+           torrent.servarr_url,
+           torrent.servarr_api_key,
+           torrent.hash
+         ) do
+      {:ok, count} ->
+        updated = %{torrent | expected_files: count}
+        {:ok, Torrent.transition(updated, :waiting_download)}
+
+      {:error, :history_empty} ->
+        # History not populated yet - wait and retry indefinitely
+        # Sonarr may take a moment to add the grab to history
+        Logger.debug("[#{torrent.hash}] History empty, waiting 3s before retry")
+        {:wait, 3000, torrent}
+
+      {:error, reason} ->
+        failure =
+          FailureHandler.build_failure(:warning, "Servarr API error: #{inspect(reason)}", %{})
+
+        {:error, "Failed to fetch Servarr history", apply_failure(torrent, failure)}
+    end
+  end
+
+  defp check_download_status(torrent) do
+    client = get_rd_client()
+
+    case RDPoller.poll_download(client, torrent.rd_id) do
+      {:ok, _info} ->
+        Logger.info("[#{torrent.hash}] Download complete on Real-Debrid")
+        {:ok, Torrent.transition(torrent, :validating_count)}
+
+      {:downloading, info} ->
+        reason = "Torrent not downloaded on RD (status: #{info.status})"
+        notify_servarr_of_failure(torrent, reason)
+        failure = FailureHandler.build_failure(:validation, reason, %{})
+        {:error, reason, apply_failure(torrent, failure)}
+
+      {:error, reason} ->
+        Logger.warning("[#{torrent.hash}] Failed to check download status: #{inspect(reason)}")
+        {:wait, 5000, torrent}
+    end
+  end
+
+  defp handle_validation_failure(phase, reason, torrent) do
+    error_msg = "#{phase} validation failed: #{inspect(reason)}"
+    notify_servarr_of_failure(torrent, error_msg)
+    failure = FailureHandler.build_failure(:validation, error_msg, %{phase: phase})
+    {:error, error_msg, apply_failure(torrent, failure)}
+  end
+
+  defp validate_path_with_retry(torrent) do
+    save_path = torrent.save_path
+
+    if save_path && File.exists?(save_path) && path_has_files?(save_path) do
+      Logger.info("[#{torrent.hash}] Path validated: #{save_path}")
+      {:ok, Torrent.transition(torrent, :success)}
+    else
+      # Path not ready yet - wait and retry indefinitely
+      # rclone mount may take time to populate after RD download completes
+      Logger.debug("[#{torrent.hash}] Path not ready, waiting: #{save_path}")
+      {:wait, Aria2Debrid.Config.path_validation_delay(), torrent}
+    end
+  end
+
+  # ============================================================================
+  # Helper Functions
+  # ============================================================================
+
+  defp apply_failure(torrent, failure) do
+    torrent
+    |> Map.put(:error, to_string(failure.reason))
+    |> Map.put(:failure_type, failure.type)
+    |> Torrent.transition(:failed)
+  end
+
+  defp convert_files_to_map(files) when is_list(files) do
+    Enum.map(files, fn f ->
+      %{"id" => f.id, "path" => f.path, "bytes" => f.bytes, "selected" => f.selected}
+    end)
+  end
+
+  defp convert_files_to_map(_), do: []
 
   defp path_has_files?(path) when is_binary(path) do
     case File.ls(path) do
@@ -541,6 +530,14 @@ defmodule ProcessingQueue.Processor do
   end
 
   defp path_has_files?(_), do: false
+
+  defp missing_servarr_url?(%Torrent{servarr_url: nil}), do: true
+  defp missing_servarr_url?(%Torrent{servarr_url: ""}), do: true
+  defp missing_servarr_url?(_), do: false
+
+  defp missing_servarr_api_key?(%Torrent{servarr_api_key: nil}), do: true
+  defp missing_servarr_api_key?(%Torrent{servarr_api_key: ""}), do: true
+  defp missing_servarr_api_key?(_), do: false
 
   defp get_rd_client do
     token = Aria2Debrid.Config.real_debrid_token()
@@ -553,331 +550,59 @@ defmodule ProcessingQueue.Processor do
     )
   end
 
-  defp select_files(files) do
-    video_extensions = Aria2Debrid.Config.streamable_extensions()
-    additional_extensions = Aria2Debrid.Config.additional_selectable_files()
-    min_file_size = Aria2Debrid.Config.min_file_size_bytes()
+  # ============================================================================
+  # Servarr Integration
+  # ============================================================================
 
-    if Aria2Debrid.Config.select_all?() do
-      Enum.map(files, & &1["id"])
-    else
-      files
-      |> Enum.filter(fn file ->
-        ext =
-          file["path"]
-          |> Path.extname()
-          |> String.trim_leading(".")
-          |> String.downcase()
-
-        file_size = file["bytes"] || 0
-
-        # Select video files that meet minimum size requirement
-        # Or select additional files without size requirement
-        (ext in video_extensions && file_size >= min_file_size) ||
-          ext in additional_extensions
-      end)
-      |> Enum.map(& &1["id"])
-    end
-  end
-
-  defp video_file?(file) do
-    ext =
-      file["path"]
-      |> Path.extname()
-      |> String.trim_leading(".")
-      |> String.downcase()
-
-    ext in Aria2Debrid.Config.streamable_extensions()
-  end
-
-  # Validates media files via Real-Debrid streaming links
-  # Returns :ok or {:error, reason}
-  defp validate_media_via_rd(torrent) do
-    client = get_rd_client()
-
-    # Get torrent info to get the RD links
-    case RealDebrid.Api.TorrentInfo.get(client, torrent.rd_id) do
-      {:ok, info} ->
-        links = info.links || []
-        files = info.files || []
-
-        # Match links to files to filter only video files
-        # RD returns links in the same order as selected files
-        selected_files =
-          files
-          |> Enum.filter(fn f -> f.selected == 1 end)
-          |> Enum.filter(&video_file_struct?/1)
-
-        # Take only as many links as we have selected video files
-        video_links = Enum.take(links, length(selected_files))
-
-        if Enum.empty?(video_links) do
-          Logger.debug("No video links to validate for #{torrent.hash}")
-          :ok
-        else
-          validate_rd_links(client, video_links, torrent.hash)
-        end
-
-      {:error, reason} ->
-        Logger.warning("Failed to get torrent info for validation: #{inspect(reason)}")
-        # Don't fail validation if we can't get info, let it continue
-        :ok
-    end
-  end
-
-  # Validates RD links by unrestricting them and running ffprobe
-  defp validate_rd_links(client, links, hash) do
-    Logger.debug("Validating #{length(links)} video links for #{hash}")
-
-    Enum.reduce_while(links, :ok, fn link, _acc ->
-      case validate_single_rd_link(client, link, hash) do
-        :ok -> {:cont, :ok}
-        {:error, _} = error -> {:halt, error}
-      end
-    end)
-  end
-
-  defp validate_single_rd_link(client, link, hash) do
-    # Unrestrict the link to get a direct download URL
-    case RealDebrid.Api.UnrestrictLink.unrestrict(client, link) do
-      {:ok, unrestricted} ->
-        download_url = unrestricted.download
-        filename = unrestricted.filename
-
-        Logger.debug("Validating #{filename} via URL for #{hash}")
-
-        case MediaValidator.validate_url(download_url) do
-          :ok ->
-            Logger.debug("Validation passed for #{filename}")
-            :ok
-
-          {:error, reason} ->
-            Logger.warning("Media validation failed for #{filename}: #{inspect(reason)}")
-            {:error, "#{filename}: #{inspect(reason)}"}
-        end
-
-      {:error, reason} ->
-        Logger.warning("Failed to unrestrict link for validation: #{inspect(reason)}")
-        # Don't fail if we can't unrestrict, continue processing
-        :ok
-    end
-  end
-
-  # Version of video_file? that works with struct format (from TorrentInfo)
-  defp video_file_struct?(file) do
-    ext =
-      file.path
-      |> Path.extname()
-      |> String.trim_leading(".")
-      |> String.downcase()
-
-    ext in Aria2Debrid.Config.streamable_extensions()
-  end
-
-  # Fetches expected file count from Servarr using credentials stored in torrent
-  # For season packs, multiple queue items share the same download_id (one per episode)
-  # Helper function to handle queue fetch with retry logic
-  defp handle_queue_fetch(torrent) do
-    max_retries = 5
-
-    case fetch_expected_files_from_servarr(torrent) do
-      {:ok, updated} ->
-        # Success - reset retry count and transition
-        updated = %{updated | retry_count: 0}
-        {:ok, Torrent.transition(updated, :waiting_download)}
-
-      {:error, :history_empty} ->
-        # History is empty - retry a few times as this may be a timing issue
-        if torrent.retry_count < max_retries do
-          Logger.warning(
-            "History empty for #{torrent.hash}, will retry in 3s (attempt #{torrent.retry_count + 1}/#{max_retries})"
-          )
-
-          updated = %{torrent | retry_count: torrent.retry_count + 1}
-          {:wait, 3000, updated}
-        else
-          # After max retries, fail with warning error
-          reason =
-            "History empty in Servarr after #{max_retries} retries - cannot validate file count"
-
-          {:error, reason,
-           Torrent.set_warning_error(
-             torrent,
-             "Servarr history empty after retries - torrent may not have been grabbed by Servarr"
-           )}
-        end
-
-      {:error, reason} ->
-        # API/network error fetching history
-        error_msg = "Failed to fetch Servarr history: #{inspect(reason)}"
-
-        {:error, error_msg,
-         Torrent.set_warning_error(torrent, "Servarr API error: #{inspect(reason)}")}
-    end
-  end
-
-  defp fetch_expected_files_from_servarr(torrent) do
-    client = ServarrClient.new(torrent.servarr_url, torrent.servarr_api_key)
-
-    # Use history API instead of queue API - it's populated immediately when Sonarr grabs
-    # Queue API is slow to update and often empty when we check
-    case ServarrClient.get_history_items_by_download_id(client, torrent.hash) do
-      {:ok, []} ->
-        # No history items found - this means Sonarr hasn't grabbed this torrent
-        # or the grab event hasn't been recorded yet
-        Logger.error(
-          "No history items found for #{torrent.hash} in Servarr - torrent may not have been grabbed by Sonarr"
-        )
-
-        # Return error so this can be retried
-        {:error, :history_empty}
-
-      {:ok, history_items} ->
-        # Count history items to get expected file count
-        # For season packs, there's one history entry per episode
-        # For movies/single episodes, there's one history entry
-        expected_count = length(history_items)
-
-        Logger.info(
-          "Found #{expected_count} grabbed history item(s) for #{torrent.hash} in Servarr"
-        )
-
-        {:ok, %{torrent | expected_files: expected_count}}
-
-      {:error, reason} ->
-        # Network/API errors
-        Logger.error(
-          "Failed to query Servarr history for #{torrent.hash}: #{inspect(reason)} - cannot validate file count"
-        )
-
-        {:error, reason}
-    end
-  end
-
-  # Fire-and-forget refresh of Servarr's monitored downloads
-  # This tells Sonarr/Radarr to re-check the download client status
   defp trigger_servarr_refresh(%Torrent{servarr_url: nil}), do: :ok
   defp trigger_servarr_refresh(%Torrent{servarr_api_key: nil}), do: :ok
 
   defp trigger_servarr_refresh(torrent) do
-    client = ServarrClient.new(torrent.servarr_url, torrent.servarr_api_key)
-
-    case ServarrClient.refresh_monitored_downloads(client) do
+    case ServarrSync.refresh(torrent.servarr_url, torrent.servarr_api_key) do
       :ok ->
-        Logger.debug("Triggered RefreshMonitoredDownloads for #{torrent.hash}")
+        Logger.debug("[#{torrent.hash}] Triggered Servarr refresh")
 
       {:error, reason} ->
-        Logger.warning("Failed to trigger RefreshMonitoredDownloads: #{inspect(reason)}")
+        Logger.warning("[#{torrent.hash}] Failed to trigger Servarr refresh: #{inspect(reason)}")
     end
 
     :ok
   end
 
-  # Trigger Servarr refresh and wait for it to complete
-  # This ensures Sonarr's queue is updated before we query it
-  defp trigger_servarr_refresh_and_wait(%Torrent{servarr_url: nil}), do: {:error, :no_url}
-  defp trigger_servarr_refresh_and_wait(%Torrent{servarr_api_key: nil}), do: {:error, :no_api_key}
-
-  defp trigger_servarr_refresh_and_wait(torrent) do
-    client = ServarrClient.new(torrent.servarr_url, torrent.servarr_api_key)
-
-    Logger.debug("Triggering RefreshMonitoredDownloads and waiting for #{torrent.hash}")
-
-    case ServarrClient.refresh_monitored_downloads_and_wait(client,
-           timeout: 30_000,
-           poll_interval: 500
-         ) do
-      :ok ->
-        Logger.debug("RefreshMonitoredDownloads completed for #{torrent.hash}")
-        # Wait a bit for queue to be fully updated after command completes
-        # The command status showing "completed" doesn't mean the queue data is immediately available
-        Process.sleep(2000)
-        Logger.debug("Queue should now be updated for #{torrent.hash}")
-        :ok
-
-      {:error, reason} ->
-        Logger.warning("RefreshMonitoredDownloads failed for #{torrent.hash}: #{inspect(reason)}")
-
-        {:error, reason}
-    end
-  end
-
-  # Notifies Servarr (Sonarr/Radarr) that a download has failed validation
-  # This triggers the auto-redownload mechanism by calling the queue DELETE endpoint
-  # with blocklist=true, which marks the release as failed and starts a new search
   defp notify_servarr_of_failure(%Torrent{servarr_url: nil}, _reason), do: :ok
   defp notify_servarr_of_failure(%Torrent{servarr_api_key: nil}, _reason), do: :ok
 
   defp notify_servarr_of_failure(torrent, reason) do
-    unless Aria2Debrid.Config.notify_servarr_on_failure?() do
-      Logger.debug("Servarr failure notification disabled, skipping for #{torrent.hash}")
-      :ok
-    else
-      client = ServarrClient.new(torrent.servarr_url, torrent.servarr_api_key)
-
-      opts = [
-        blocklist: Aria2Debrid.Config.servarr_blocklist_on_failure?(),
-        search: Aria2Debrid.Config.servarr_search_on_failure?()
-      ]
-
-      case ServarrClient.mark_download_as_failed(client, torrent.hash, opts) do
-        {:ok, 0} ->
-          Logger.debug(
-            "No queue items found in Servarr for #{torrent.hash}, cannot trigger auto-redownload"
-          )
-
-        {:ok, count} ->
-          Logger.info(
-            "Marked #{count} queue item(s) as failed in Servarr for #{torrent.hash}: #{reason} " <>
-              "(blocklist: #{opts[:blocklist]}, search: #{opts[:search]})"
-          )
-
-        {:error, err} ->
-          Logger.warning(
-            "Failed to notify Servarr of failure for #{torrent.hash}: #{inspect(err)}"
-          )
-      end
-
-      :ok
-    end
+    ServarrSync.notify_failure(
+      torrent.servarr_url,
+      torrent.servarr_api_key,
+      torrent.hash,
+      reason
+    )
   end
 
-  # Cleans up Real-Debrid torrent when a download fails
-  # This frees up RD resources and slots immediately rather than waiting
-  # for Sonarr to call aria2.remove (which may not happen depending on settings)
-  # Runs synchronously to ensure cleanup completes before process exits
-  defp cleanup_real_debrid_on_failure(torrent) do
-    Logger.debug(
-      "Starting RD cleanup for failed torrent #{torrent.hash} (RD ID: #{torrent.rd_id})"
-    )
+  # ============================================================================
+  # Real-Debrid Cleanup
+  # ============================================================================
 
-    try do
-      client = get_rd_client()
-      Logger.debug("RD client created, calling Delete.delete for RD ID: #{torrent.rd_id}")
+  defp cleanup_real_debrid(%Torrent{rd_id: nil}), do: :ok
 
-      case RealDebrid.Api.Delete.delete(client, torrent.rd_id) do
-        :ok ->
-          Logger.info(
-            "✓ Successfully deleted failed torrent #{torrent.hash} (RD ID: #{torrent.rd_id}) from Real-Debrid"
-          )
+  defp cleanup_real_debrid(torrent) do
+    case RDPoller.get_client() do
+      nil ->
+        Logger.warning("[#{torrent.hash}] No RD client available for cleanup")
+        :ok
 
-          :ok
+      client ->
+        case RDPoller.delete_torrent(client, torrent.rd_id) do
+          :ok ->
+            Logger.info("[#{torrent.hash}] Deleted from Real-Debrid (RD ID: #{torrent.rd_id})")
+            :ok
 
-        {:error, reason} ->
-          Logger.warning(
-            "✗ Failed to auto-delete torrent #{torrent.hash} (RD ID: #{torrent.rd_id}) from Real-Debrid: #{inspect(reason)}"
-          )
-
-          {:error, reason}
-      end
-    rescue
-      e ->
-        Logger.error(
-          "✗ Exception while auto-deleting torrent #{torrent.hash} (RD ID: #{torrent.rd_id}) from Real-Debrid: #{inspect(e)}"
-        )
-
-        Logger.error("Stacktrace: #{Exception.format_stacktrace(__STACKTRACE__)}")
-        {:error, e}
+          {:error, reason} ->
+            Logger.warning("[#{torrent.hash}] Failed to delete from RD: #{inspect(reason)}")
+            {:error, reason}
+        end
     end
   end
 end
