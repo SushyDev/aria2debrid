@@ -185,8 +185,11 @@ defmodule ProcessingQueue.Validators.MediaValidator do
       {:ok, links} ->
         # Find matching link for this file
         case find_link_for_file(links, file_id, torrent) do
-          {:ok, link} -> RDPoller.unrestrict_link(client, link)
-          error -> error
+          {:ok, link} ->
+            RDPoller.unrestrict_link(client, link)
+
+          error ->
+            error
         end
 
       error ->
@@ -195,27 +198,45 @@ defmodule ProcessingQueue.Validators.MediaValidator do
   end
 
   defp find_link_for_file(links, file_id, torrent) when is_list(links) do
-    filename = get_filename_by_id(torrent.files, file_id)
+    if Enum.empty?(links) do
+      {:error, :no_links_available}
+    else
+      # Real-Debrid returns links in the same order as selected files
+      # Get all selected files and find the index of our file
+      selected_files =
+        torrent.files
+        |> Enum.filter(&(&1["selected"] == 1))
+        |> Enum.sort_by(&get_file_id/1)
 
-    # Links from RD are ordered by file selection
-    # Try to match by filename or position
-    matching_link =
-      Enum.find(links, fn link ->
-        link_filename = link |> URI.parse() |> Map.get(:path, "") |> Path.basename()
-        String.ends_with?(link_filename, Path.basename(filename || ""))
-      end)
+      file_index = Enum.find_index(selected_files, fn f -> get_file_id(f) == file_id end)
 
-    case matching_link do
-      nil when length(links) == 1 ->
-        # Only use fallback if there's exactly one link - otherwise we can't be sure
-        Logger.debug("Using single available link as fallback")
-        {:ok, List.first(links)}
+      case file_index do
+        nil ->
+          Logger.warning("[#{torrent.hash}] File ID #{file_id} not found in selected files")
+          {:error, :file_not_selected}
 
-      nil ->
-        {:error, :no_matching_link}
+        index when index < length(links) ->
+          link = Enum.at(links, index)
 
-      link ->
-        {:ok, link}
+          Logger.debug(
+            "[#{torrent.hash}] Matched file ID #{file_id} to link at position #{index}"
+          )
+
+          {:ok, link}
+
+        index ->
+          Logger.warning(
+            "[#{torrent.hash}] File index #{index} out of bounds for #{length(links)} links (file_id=#{file_id})"
+          )
+
+          # Fallback: use first link if only one available
+          if length(links) == 1 do
+            Logger.debug("[#{torrent.hash}] Using single available link as fallback")
+            {:ok, List.first(links)}
+          else
+            {:error, :link_index_out_of_bounds}
+          end
+      end
     end
   end
 

@@ -594,14 +594,16 @@ flowchart TB
             STATFailPerm["status: error<br/>errorCode: 1<br/>(:permanent)"]
             STATFailWarn["status: active<br/>completedLength: 0<br/>(:warning - appears stalled)"]
             STATWaiting["status: waiting<br/>completedLength: 0<br/>(pending/adding_rd/<br/>waiting_metadata/<br/>selecting_files/<br/>refreshing_info/<br/>fetching_queue)"]
-            STATActive["status: active<br/>completedLength from RD<br/>(waiting_download/<br/>validating_*)"]
+            STATActive["status: active<br/>completedLength: 1 byte<br/>(validating_*)"]
+            STATDownloading["status: active<br/>completedLength from RD<br/>(waiting_download)"]
             
             STATMapState -- ":success" --> STATSuccess
             STATMapState -- ":failed + :validation" --> STATFailVal
             STATMapState -- ":failed + :permanent" --> STATFailPerm
             STATMapState -- ":failed + :warning" --> STATFailWarn
             STATMapState -- "@waiting_states" --> STATWaiting
-            STATMapState -- "@active_states" --> STATActive
+            STATMapState -- "validating_*" --> STATActive
+            STATMapState -- "waiting_download" --> STATDownloading
         end
         
         subgraph STATUS_Format["E. Format Response"]
@@ -830,6 +832,10 @@ flowchart TB
 %%     - tellActive: @active_states + warning failures
 %%     - tellWaiting: @waiting_states
 %%     - tellStopped: success + failed (excl. warning)
+%%   ✓ Validation states show completedLength: 1 byte to appear in Sonarr Activity
+%%     - Prevents "Downloaded - Waiting to Import" status (not 100%)
+%%     - Prevents being hidden from Activity view (not 0%)
+%%     - Sonarr shows "Downloading" with minimal progress until validation complete
 %% 
 %% EXTERNAL DEPENDENCIES:
 %%   • Real-Debrid API - Torrent management, file selection, streaming
