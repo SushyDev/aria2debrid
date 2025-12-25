@@ -27,12 +27,6 @@ defmodule ProcessingQueue.ErrorClassifierTest do
       assert ErrorClassifier.classify("file is a sample") == :validation
     end
 
-    test "classifies file size issues as validation" do
-      assert ErrorClassifier.classify("file too small, minimum size not met") == :validation
-      assert ErrorClassifier.classify("File is too small") == :validation
-      assert ErrorClassifier.classify("min file size not met") == :validation
-    end
-
     test "classifies missing streams as validation" do
       assert ErrorClassifier.classify("no video stream found") == :validation
       assert ErrorClassifier.classify("missing video stream") == :validation

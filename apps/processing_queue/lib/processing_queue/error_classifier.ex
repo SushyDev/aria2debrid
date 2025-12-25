@@ -12,7 +12,6 @@ defmodule ProcessingQueue.ErrorClassifier do
   - Media validation failure (FFprobe checks)
   - Path validation failure (files don't exist)
   - Sample file detected
-  - Minimum file size not met
   - No video/audio stream found
 
   ### `:permanent` - Permanent Failures
@@ -81,7 +80,6 @@ defmodule ProcessingQueue.ErrorClassifier do
     {:media_validation_failed, ~r/media validation|validation failed/i},
     {:ffprobe_failed, ~r/ffprobe.*failed/i},
     {:sample_file, ~r/sample/i},
-    {:file_too_small, ~r/too small|minimum size|min.*size/i},
     {:no_video_stream, ~r/no video stream|missing video/i},
     {:no_audio_stream, ~r/no audio stream|missing audio/i},
     {:path_not_found, ~r/path not found|file does not exist|file not found/i},

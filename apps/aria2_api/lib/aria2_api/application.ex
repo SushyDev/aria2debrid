@@ -9,6 +9,7 @@ defmodule Aria2Api.Application do
     host = Aria2Debrid.Config.aria2_host()
 
     children = [
+      {Aria2Api.CredentialCache, []},
       {Aria2Api.GidRegistry, []},
       {Bandit, plug: Aria2Api.Router, port: port, ip: parse_host(host)}
     ]

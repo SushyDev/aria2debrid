@@ -214,7 +214,7 @@ defmodule Aria2Debrid.Config do
   """
   @spec sample_min_runtime() :: pos_integer()
   def sample_min_runtime do
-    get_env(:media_validator, :sample_min_runtime, 300)
+    get_env(:media_validator, :sample_min_runtime, 600)
   end
 
   @doc """

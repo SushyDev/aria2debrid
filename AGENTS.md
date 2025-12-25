@@ -118,7 +118,38 @@ The SecretToken is parsed directly as `url|api_key` format. The pipe character `
 - **REQUIRED**: SecretToken must be configured, otherwise returns empty list (no downloads visible)
 - Uses `/api/v3/history/since?eventType=grabbed` endpoint (simple, no pagination needed)
 
-### 5. Torrent Completion Requirements
+### 5. Credential Cache for Health Checks
+**Critical Decision** (see `apps/aria2_api/lib/aria2_api/credential_cache.ex`):
+
+**Problem**: Sonarr/Radarr periodically call `aria2.getVersion` for health checks. If credentials are validated on every call by hitting the Servarr API, temporary Servarr unavailability causes Sonarr to mark aria2debrid as "unavailable".
+
+**Solution**: Cache successful credential validations for the lifetime of the application (verify-once approach).
+
+**Implementation**:
+- GenServer-based cache (`Aria2Api.CredentialCache`) in supervision tree
+- Uses SHA256 hash of `url:api_key` as cache key (secure, no raw credentials stored)
+- Case-insensitive URL matching with trailing slash normalization
+- Per hostname + token basis (different Servarr instances cached separately)
+
+**How It Works**:
+- **First `aria2.getVersion` call** (e.g., "Test" button):
+  1. Check cache for credentials → not found
+  2. Validate by calling Servarr `/api/v3/system/status`
+  3. Cache successful validation with SHA256 hash key
+  4. Return version info
+- **Subsequent `aria2.getVersion` calls** (health checks):
+  1. Check cache for credentials → found!
+  2. Return version info immediately (no Servarr API call)
+
+**Key Points**:
+- Credentials validated once per application lifetime (resets on restart)
+- Eliminates repeated Servarr API calls during health checks
+- Prevents "unavailable" status from temporary Servarr issues
+- First validation still provides user feedback (Test button shows real errors)
+- Cache keys are hashed for security (SHA256 of `normalized_url:api_key`)
+- Use `validate_credentials_cached/1` for health checks, `validate_credentials/1` for explicit validation
+
+### 6. Torrent Completion Requirements
 **Critical Decision**:
 - Torrent NOT complete when Real-Debrid finishes downloading
 - Torrent NOT complete after file count validation passes
@@ -158,7 +189,6 @@ validating_paths → success (or failed)
 ### 8. Media Validation Strategy
 **Decision** (see `apps/media_validator/lib/media_validator.ex`):
 - Use FFprobe to validate video/audio streams before marking complete
-- Check for minimum file size to detect samples
 - Validate file extensions match expected video formats
 - Sample detection: filename patterns like "sample", "preview", "trailer"
 - All validation happens via streaming links (before full download completes)

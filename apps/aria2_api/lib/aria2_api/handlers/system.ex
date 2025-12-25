@@ -95,6 +95,9 @@ defmodule Aria2Api.Handlers.System do
   @doc """
   Validates Servarr credentials by calling the system/status endpoint.
   Called during Sonarr/Radarr's "Test" button.
+
+  This function always validates credentials, even if they're cached.
+  Use `validate_credentials_cached/1` for cached validation.
   """
   def validate_credentials(nil) do
     {:ok, %{"status" => "ok", "message" => "No credentials configured"}}
@@ -113,6 +116,9 @@ defmodule Aria2Api.Handlers.System do
       :ok ->
         Logger.info("✓ Servarr credentials validated: #{servarr_url}")
 
+        # Cache the successful validation
+        Aria2Api.CredentialCache.mark_validated({servarr_url, servarr_api_key})
+
         {:ok,
          %{
            "status" => "ok",
@@ -125,6 +131,38 @@ defmodule Aria2Api.Handlers.System do
 
         {:error, 1,
          "Failed to connect to Servarr at #{servarr_url}: #{inspect(reason)}. Check SecretToken format (url|api_key) and ensure Servarr is accessible."}
+    end
+  end
+
+  @doc """
+  Validates Servarr credentials with caching.
+
+  If credentials were previously validated successfully, returns success immediately
+  without calling the Servarr API. Otherwise, performs full validation.
+
+  This is used during health checks to avoid repeatedly calling the Servarr API.
+  """
+  def validate_credentials_cached(nil) do
+    {:ok, %{"status" => "ok", "message" => "No credentials configured"}}
+  end
+
+  def validate_credentials_cached({servarr_url, servarr_api_key} = creds) do
+    require Logger
+
+    if Aria2Api.CredentialCache.validated?(creds) do
+      Logger.debug(
+        "Servarr credentials already validated (cached): url=#{servarr_url}, api_key=#{String.slice(servarr_api_key, 0..7)}..."
+      )
+
+      {:ok,
+       %{
+         "status" => "ok",
+         "message" => "Credentials previously validated (cached)",
+         "servarrUrl" => servarr_url
+       }}
+    else
+      # First time validation - perform full check and cache result
+      validate_credentials(creds)
     end
   end
 

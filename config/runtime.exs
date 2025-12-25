@@ -41,9 +41,7 @@ if config_env() in [:dev, :prod] do
     streamable_extensions:
       (System.get_env("STREAMABLE_EXTENSIONS") || "mkv,mp4,avi,m4v,mov,wmv,webm")
       |> String.split(",")
-      |> Enum.map(&String.trim/1),
-    min_file_size_bytes:
-      String.to_integer(System.get_env("MIN_FILE_SIZE_MB") || "500") * 1024 * 1024
+      |> Enum.map(&String.trim/1)
 
   # Save path config
   save_path =

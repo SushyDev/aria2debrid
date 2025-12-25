@@ -52,4 +52,103 @@ defmodule Aria2Api.Handlers.DownloadsTest do
       assert length(result) == 0
     end
   end
+
+  describe "torrent_to_aria2/2" do
+    test "always includes at least one file entry even with nil files" do
+      torrent = %ProcessingQueue.Torrent{
+        hash: "abc123def456",
+        name: "Test Torrent",
+        magnet: "magnet:?xt=urn:btih:abc123",
+        state: :waiting_metadata,
+        files: nil,
+        size: 1024,
+        save_path: "/downloads",
+        added_at: DateTime.utc_now()
+      }
+
+      result = Downloads.torrent_to_aria2(torrent, "0000000000000001")
+
+      assert is_list(result["files"])
+      assert length(result["files"]) >= 1
+
+      # Verify the placeholder file has required fields
+      first_file = hd(result["files"])
+      assert first_file["path"] == "/downloads/Test Torrent"
+      assert first_file["length"] == "1024"
+      assert first_file["selected"] == "true"
+    end
+
+    test "always includes at least one file entry even with empty files array" do
+      torrent = %ProcessingQueue.Torrent{
+        hash: "abc123def456",
+        name: nil,
+        magnet: "magnet:?xt=urn:btih:abc123",
+        state: :selecting_files,
+        files: [],
+        size: 2048,
+        save_path: "/downloads",
+        added_at: DateTime.utc_now()
+      }
+
+      result = Downloads.torrent_to_aria2(torrent, "0000000000000002")
+
+      assert is_list(result["files"])
+      assert length(result["files"]) >= 1
+
+      # When name is nil, should use hash as filename
+      first_file = hd(result["files"])
+      assert first_file["path"] == "/downloads/abc123def456"
+      assert first_file["length"] == "2048"
+    end
+
+    test "always includes at least one file entry when no files are selected" do
+      torrent = %ProcessingQueue.Torrent{
+        hash: "abc123def456",
+        name: "Multi-File Torrent",
+        magnet: "magnet:?xt=urn:btih:abc123",
+        state: :selecting_files,
+        files: [
+          %{"path" => "file1.mkv", "bytes" => 1000, "selected" => 0},
+          %{"path" => "file2.mkv", "bytes" => 2000, "selected" => 0}
+        ],
+        size: 3000,
+        save_path: "/downloads",
+        added_at: DateTime.utc_now()
+      }
+
+      result = Downloads.torrent_to_aria2(torrent, "0000000000000003")
+
+      # Should return placeholder since no files are selected
+      assert is_list(result["files"])
+      assert length(result["files"]) >= 1
+
+      first_file = hd(result["files"])
+      assert first_file["path"] == "/downloads/Multi-File Torrent"
+    end
+
+    test "returns actual files when files are selected" do
+      torrent = %ProcessingQueue.Torrent{
+        hash: "abc123def456",
+        name: "Multi-File Torrent",
+        magnet: "magnet:?xt=urn:btih:abc123",
+        state: :waiting_download,
+        files: [
+          %{"path" => "file1.mkv", "bytes" => 1000, "selected" => 1},
+          %{"path" => "file2.mkv", "bytes" => 2000, "selected" => 1}
+        ],
+        size: 3000,
+        save_path: "/downloads",
+        added_at: DateTime.utc_now()
+      }
+
+      result = Downloads.torrent_to_aria2(torrent, "0000000000000004")
+
+      # Should return actual selected files
+      assert is_list(result["files"])
+      assert length(result["files"]) == 2
+
+      assert Enum.at(result["files"], 0)["path"] == "/downloads/file1.mkv"
+      assert Enum.at(result["files"], 1)["path"] == "/downloads/file2.mkv"
+    end
+  end
 end

@@ -492,27 +492,57 @@ defmodule Aria2Api.Handlers.Downloads do
 
   defp calculate_completed_length(_), do: 0
 
-  defp build_files(%Torrent{files: nil}), do: []
+  defp build_files(%Torrent{files: nil} = torrent) do
+    # No files metadata yet - return a placeholder to prevent Sonarr crash
+    # Sonarr calls GetLongestCommonPath which requires at least one file
+    build_placeholder_files(torrent)
+  end
 
-  defp build_files(%Torrent{files: files, save_path: save_path}) do
+  defp build_files(%Torrent{files: files, save_path: save_path} = torrent) do
     base_path = save_path || Aria2Debrid.Config.save_path()
 
-    files
-    |> Enum.filter(fn file -> file["selected"] == 1 end)
-    |> Enum.with_index(1)
-    |> Enum.map(fn {file, index} ->
-      path = file["path"] || ""
-      size = file["bytes"] || 0
+    selected_files =
+      files
+      |> Enum.filter(fn file -> file["selected"] == 1 end)
+      |> Enum.with_index(1)
+      |> Enum.map(fn {file, index} ->
+        path = file["path"] || ""
+        size = file["bytes"] || 0
 
+        %{
+          "index" => to_string(index),
+          "path" => Path.join(base_path, path),
+          "length" => to_string(size),
+          "completedLength" => to_string(size),
+          "selected" => "true",
+          "uris" => []
+        }
+      end)
+
+    # If no files selected, return placeholder to prevent Sonarr crash
+    # This can happen during early stages before file selection completes
+    if Enum.empty?(selected_files) do
+      build_placeholder_files(torrent)
+    else
+      selected_files
+    end
+  end
+
+  defp build_placeholder_files(%Torrent{name: name, hash: hash, save_path: save_path, size: size}) do
+    base_path = save_path || Aria2Debrid.Config.save_path()
+    # Use torrent name or hash as placeholder filename
+    filename = name || hash
+
+    [
       %{
-        "index" => to_string(index),
-        "path" => Path.join(base_path, path),
-        "length" => to_string(size),
-        "completedLength" => to_string(size),
+        "index" => "1",
+        "path" => Path.join(base_path, filename),
+        "length" => to_string(size || 0),
+        "completedLength" => to_string(size || 0),
         "selected" => "true",
         "uris" => []
       }
-    end)
+    ]
   end
 
   defp build_bittorrent_info(%Torrent{name: name, hash: hash, files: files, size: size}) do

@@ -2,8 +2,8 @@ defmodule MediaValidator do
   @moduledoc """
   Media file validation using FFprobe.
 
-  Validates that media files are valid video files with required streams,
-  filters out sample files, and checks file sizes.
+  Validates that media files are valid video files with required streams
+  and filters out sample files.
   """
 
   alias MediaValidator.FFprobe
@@ -25,7 +25,6 @@ defmodule MediaValidator do
 
   ## Validation checks:
   - File exists and is readable
-  - File size meets minimum requirement
   - File is not a sample (based on name and duration)
   - File has video stream (if required)
   - File has audio stream (if required)
@@ -45,7 +44,7 @@ defmodule MediaValidator do
   Validates a media file via URL (e.g., Real-Debrid streaming link).
 
   This is used when files aren't available locally but can be validated
-  via HTTP streaming. Skips file existence and size checks.
+  via HTTP streaming. Skips file existence checks.
 
   ## Validation checks:
   - File has video stream (if required)
@@ -119,8 +118,6 @@ defmodule MediaValidator do
   end
 
   defp do_validate(path, opts) do
-    min_size = Keyword.get(opts, :min_file_size_bytes, Aria2Debrid.Config.min_file_size_bytes())
-
     require_video =
       Keyword.get(opts, :require_video_stream, Aria2Debrid.Config.require_video_stream?())
 
@@ -134,7 +131,6 @@ defmodule MediaValidator do
       Keyword.get(opts, :sample_min_runtime, Aria2Debrid.Config.sample_min_runtime())
 
     with :ok <- check_file_exists(path),
-         :ok <- check_file_size(path, min_size),
          :ok <- check_not_sample_by_name(path, reject_samples),
          {:ok, probe_data} <- FFprobe.probe(path),
          :ok <- check_video_stream(probe_data, require_video),
@@ -173,18 +169,6 @@ defmodule MediaValidator do
       :ok
     else
       {:error, "File does not exist: #{path}"}
-    end
-  end
-
-  defp check_file_size(_path, 0), do: :ok
-
-  defp check_file_size(path, min_size) do
-    size = get_file_size(path)
-
-    if size >= min_size do
-      :ok
-    else
-      {:error, "File too small: #{size} bytes (minimum: #{min_size})"}
     end
   end
 

@@ -9,8 +9,7 @@ defmodule ProcessingQueue.FileSelector do
   - Subtitle files: srt, sub, idx, ass, ssa, smi, vtt (configurable)
   - Metadata files: nfo, jpg, jpeg, png, tbn (configurable)
 
-  Video files must meet the minimum size requirement.
-  Subtitle/metadata files are selected regardless of size.
+  All matching files are selected regardless of size.
 
   ## Usage
 
@@ -21,7 +20,7 @@ defmodule ProcessingQueue.FileSelector do
       ]
 
       FileSelector.select(files)
-      # => [1, 3]  # selects movie.mkv and subs.srt, excludes sample (too small)
+      # => [1, 2, 3]  # selects all video and subtitle files
   """
 
   @doc """
@@ -135,20 +134,18 @@ defmodule ProcessingQueue.FileSelector do
   @doc """
   Checks if a file should be selected for download.
 
-  Video files must meet minimum size requirements.
-  Subtitle and metadata files are always selected if they match.
+  Video, subtitle, and metadata files are all selected if they match the extension list.
   """
   @spec selectable?(map()) :: boolean()
   def selectable?(file) when is_map(file) do
     ext = get_extension(file["path"])
-    file_size = file["bytes"] || 0
 
     cond do
-      # Video files must meet minimum size
+      # Video files
       ext in video_extensions() ->
-        file_size >= min_file_size()
+        true
 
-      # Additional files (subtitles, metadata) - no size requirement
+      # Additional files (subtitles, metadata)
       ext in additional_extensions() ->
         true
 
@@ -175,9 +172,5 @@ defmodule ProcessingQueue.FileSelector do
 
   defp additional_extensions do
     Aria2Debrid.Config.additional_selectable_files()
-  end
-
-  defp min_file_size do
-    Aria2Debrid.Config.min_file_size_bytes()
   end
 end

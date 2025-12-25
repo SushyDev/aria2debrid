@@ -37,10 +37,15 @@ flowchart TB
             direction LR
             APIExtractSecret["Extract SecretToken<br/>(url|api_key format)"]
             APIValidateSecret{"Valid format?"}
+            APICheckCache{"Credentials<br/>cached?"}
+            APICallServarr["Validate via<br/>Servarr API"]
+            APICacheSuccess["Cache validation<br/>(SHA256 hash)"]
             APIStoreCreds["Store Servarr credentials"]
             
             APIExtractSecret --> APIValidateSecret
-            APIValidateSecret -- Yes --> APIStoreCreds
+            APIValidateSecret -- Yes --> APICheckCache
+            APICheckCache -- No --> APICallServarr --> APICacheSuccess --> APIStoreCreds
+            APICheckCache -- Yes --> APIStoreCreds
         end
         
         subgraph API_Dispatch["C. Method Dispatch"]
@@ -272,7 +277,7 @@ flowchart TB
         
         subgraph S4_Filter["B. Filter & Select"]
             direction LR
-            S4S1["FileSelector.filter(files)<br/>• Video: mkv, mp4, avi...<br/>• Subs: srt, sub, idx<br/>• Meta: nfo, jpg<br/>• Min size check"]
+            S4S1["FileSelector.filter(files)<br/>• Video: mkv, mp4, avi...<br/>• Subs: srt, sub, idx<br/>• Meta: nfo, jpg"]
             S4S2["Build selected_file_ids list"]
             S4S3["RealDebrid.select_files(rd_id, ids)"]
             S4S4{"Success?"}
