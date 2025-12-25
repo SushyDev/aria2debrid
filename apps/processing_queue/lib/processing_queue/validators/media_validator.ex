@@ -134,18 +134,24 @@ defmodule ProcessingQueue.Validators.MediaValidator do
       {:ok, url, _filename} ->
         Logger.debug("[#{hash}] Got streaming URL for #{filename}")
 
-        case MediaValidator.validate_url(url, enabled: true) do
+        case MediaValidator.validate_url(url, enabled: true, filename: filename) do
           :ok ->
             Logger.debug("[#{hash}] Media validation passed: #{filename}")
             :ok
 
           {:error, reason} ->
-            Logger.warning("[#{hash}] Media validation failed for #{filename}: #{inspect(reason)}")
+            Logger.warning(
+              "[#{hash}] Media validation failed for #{filename}: #{inspect(reason)}"
+            )
+
             {:error, {:media_validation_failed, filename, reason}}
         end
 
       {:error, reason} ->
-        Logger.warning("[#{hash}] Failed to get streaming link for #{filename}: #{inspect(reason)}")
+        Logger.warning(
+          "[#{hash}] Failed to get streaming link for #{filename}: #{inspect(reason)}"
+        )
+
         {:error, {:streaming_link_failed, filename, reason}}
     end
   end
@@ -200,8 +206,9 @@ defmodule ProcessingQueue.Validators.MediaValidator do
       end)
 
     case matching_link do
-      nil when links != [] ->
-        # Fallback to first link if only one
+      nil when length(links) == 1 ->
+        # Only use fallback if there's exactly one link - otherwise we can't be sure
+        Logger.debug("Using single available link as fallback")
         {:ok, List.first(links)}
 
       nil ->

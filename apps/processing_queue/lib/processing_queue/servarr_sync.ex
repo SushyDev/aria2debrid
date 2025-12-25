@@ -180,7 +180,8 @@ defmodule ProcessingQueue.ServarrSync do
       client = ServarrClient.new(url, api_key)
 
       opts = [
-        blocklist: Keyword.get(opts, :blocklist, Aria2Debrid.Config.servarr_blocklist_on_failure?()),
+        blocklist:
+          Keyword.get(opts, :blocklist, Aria2Debrid.Config.servarr_blocklist_on_failure?()),
         search: Keyword.get(opts, :search, Aria2Debrid.Config.servarr_search_on_failure?())
       ]
 

@@ -80,7 +80,8 @@ defmodule ProcessingQueue.ValidationPipeline do
   @doc """
   Runs path validation with retries.
   """
-  @spec run_path_with_retry(Torrent.t(), keyword()) :: :ok | {:skip, String.t()} | {:error, term()}
+  @spec run_path_with_retry(Torrent.t(), keyword()) ::
+          :ok | {:skip, String.t()} | {:error, term()}
   def run_path_with_retry(%Torrent{} = torrent, opts \\ []) do
     PathValidator.validate_with_retry(torrent, opts)
   end

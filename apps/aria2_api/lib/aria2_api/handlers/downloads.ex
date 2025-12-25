@@ -127,7 +127,14 @@ defmodule Aria2Api.Handlers.Downloads do
   @active_states [:waiting_download, :validating_count, :validating_media, :validating_path]
 
   # States that map to aria2 status="waiting"
-  @waiting_states [:pending, :adding_rd, :waiting_metadata, :selecting_files, :refreshing_info, :fetching_queue]
+  @waiting_states [
+    :pending,
+    :adding_rd,
+    :waiting_metadata,
+    :selecting_files,
+    :refreshing_info,
+    :fetching_queue
+  ]
 
   @doc """
   Handles aria2.tellActive - List active downloads.
@@ -151,7 +158,7 @@ defmodule Aria2Api.Handlers.Downloads do
     filtered_torrents = filter_by_servarr(active_torrents, servarr_credentials)
 
     Logger.debug(
-      "tellActive: #{length(all_torrents)} total, #{length(active_torrents)} active, #{length(filtered_torrents)} after filtering"
+      "tellActive: #{length(all_torrents)} total, #{length(active_torrents)} active/warning, #{length(filtered_torrents)} after filtering"
     )
 
     downloads =

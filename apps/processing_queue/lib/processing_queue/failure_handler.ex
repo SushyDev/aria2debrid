@@ -86,7 +86,8 @@ defmodule ProcessingQueue.FailureHandler do
     - Failure struct
   """
   @spec build_failure(failure_type(), term(), map()) :: failure()
-  def build_failure(type, reason, context) when type in [:validation, :permanent, :warning, :application] do
+  def build_failure(type, reason, context)
+      when type in [:validation, :permanent, :warning, :application] do
     %{
       type: type,
       reason: reason,
@@ -116,7 +117,7 @@ defmodule ProcessingQueue.FailureHandler do
   ## Raises
     - RuntimeError if error type is `:application`
   """
-  @spec execute((() -> {:ok, term()} | {:error, term()} | term()), map()) ::
+  @spec execute((-> {:ok, term()} | {:error, term()} | term()), map()) ::
           {:ok, term()} | {:error, failure()}
   def execute(operation, context \\ %{}) when is_function(operation, 0) do
     try do
@@ -172,9 +173,7 @@ defmodule ProcessingQueue.FailureHandler do
   def handle_failure(failure, %Torrent{} = torrent) do
     hash = torrent.hash
 
-    Logger.warning(
-      "[#{hash}] Handling #{failure.type} failure: #{inspect(failure.reason)}"
-    )
+    Logger.warning("[#{hash}] Handling #{failure.type} failure: #{inspect(failure.reason)}")
 
     # Notify Servarr if needed
     if failure.notify_servarr do
@@ -242,10 +241,11 @@ defmodule ProcessingQueue.FailureHandler do
 
   def handle_validation_result({:error, reason}, phase, torrent) do
     # Validation errors are always :validation type
-    failure = build_failure(:validation, "#{phase} validation failed: #{inspect(reason)}", %{
-      hash: torrent.hash,
-      phase: phase
-    })
+    failure =
+      build_failure(:validation, "#{phase} validation failed: #{inspect(reason)}", %{
+        hash: torrent.hash,
+        phase: phase
+      })
 
     handle_failure(failure, torrent)
   end
@@ -272,10 +272,11 @@ defmodule ProcessingQueue.FailureHandler do
   end
 
   def handle_pipeline_result({:error, phase, reason}, torrent) do
-    failure = build_failure(:validation, "#{phase} validation failed: #{inspect(reason)}", %{
-      hash: torrent.hash,
-      phase: phase
-    })
+    failure =
+      build_failure(:validation, "#{phase} validation failed: #{inspect(reason)}", %{
+        hash: torrent.hash,
+        phase: phase
+      })
 
     handle_failure(failure, torrent)
   end

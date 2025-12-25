@@ -62,7 +62,7 @@ defmodule ProcessingQueue.RetryPolicy do
     base_delay = Keyword.get(opts, :base_delay, @default_base_delay)
     max_delay = Keyword.get(opts, :max_delay, @default_max_delay)
 
-    delay = base_delay * :math.pow(2, attempt) |> trunc()
+    delay = (base_delay * :math.pow(2, attempt)) |> trunc()
     min(delay, max_delay)
   end
 

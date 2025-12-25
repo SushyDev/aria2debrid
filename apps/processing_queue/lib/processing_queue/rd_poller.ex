@@ -76,7 +76,11 @@ defmodule ProcessingQueue.RDPoller do
     - `{:downloading, info}` - Still downloading/queued
     - `{:error, reason, info}` - Terminal error state
   """
-  @spec check_status(struct()) :: {:ready | :downloaded | :downloading | :error, term()} | {:error, atom(), struct()}
+  @spec check_status(struct()) ::
+          {:ready, struct()}
+          | {:downloaded, struct()}
+          | {:downloading, struct()}
+          | {:error, atom(), struct()}
   def check_status(info) do
     case info.status do
       "waiting_files_selection" ->

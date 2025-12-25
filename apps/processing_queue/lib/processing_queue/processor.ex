@@ -291,7 +291,9 @@ defmodule ProcessingQueue.Processor do
         {:ok, Torrent.transition(updated, :waiting_metadata)}
 
       {:error, reason} ->
-        failure = FailureHandler.build_failure(:permanent, "Failed to add to RD: #{inspect(reason)}", %{})
+        failure =
+          FailureHandler.build_failure(:permanent, "Failed to add to RD: #{inspect(reason)}", %{})
+
         {:error, inspect(reason), apply_failure(torrent, failure)}
     end
   end
@@ -322,7 +324,10 @@ defmodule ProcessingQueue.Processor do
       failure = FailureHandler.build_failure(:validation, reason, %{})
       {:error, reason, apply_failure(torrent, failure)}
     else
-      Logger.info("[#{torrent.hash}] RD status is #{status}, proceeding (require_downloaded=false)")
+      Logger.info(
+        "[#{torrent.hash}] RD status is #{status}, proceeding (require_downloaded=false)"
+      )
+
       {:ok, Torrent.transition(torrent, :validating_count)}
     end
   end
@@ -364,7 +369,9 @@ defmodule ProcessingQueue.Processor do
     files = torrent.files || []
     selected_ids = FileSelector.select(files)
 
-    Logger.debug("[#{torrent.hash}] Selected #{length(selected_ids)} files: #{inspect(selected_ids)}")
+    Logger.debug(
+      "[#{torrent.hash}] Selected #{length(selected_ids)} files: #{inspect(selected_ids)}"
+    )
 
     if Enum.empty?(selected_ids) do
       # This is a validation failure - the torrent doesn't have valid video files
@@ -379,7 +386,13 @@ defmodule ProcessingQueue.Processor do
           {:ok, Torrent.transition(updated, :refreshing_info)}
 
         {:error, reason} ->
-          failure = FailureHandler.build_failure(:permanent, "File selection failed: #{inspect(reason)}", %{})
+          failure =
+            FailureHandler.build_failure(
+              :permanent,
+              "File selection failed: #{inspect(reason)}",
+              %{}
+            )
+
           {:error, "File selection failed", apply_failure(torrent, failure)}
       end
     end
@@ -389,11 +402,15 @@ defmodule ProcessingQueue.Processor do
     cond do
       missing_servarr_url?(torrent) ->
         failure = FailureHandler.build_failure(:warning, "Missing Servarr URL", %{})
-        {:error, "File count validation enabled but no Servarr URL", apply_failure(torrent, failure)}
+
+        {:error, "File count validation enabled but no Servarr URL",
+         apply_failure(torrent, failure)}
 
       missing_servarr_api_key?(torrent) ->
         failure = FailureHandler.build_failure(:warning, "Missing Servarr API key", %{})
-        {:error, "File count validation enabled but no Servarr API key", apply_failure(torrent, failure)}
+
+        {:error, "File count validation enabled but no Servarr API key",
+         apply_failure(torrent, failure)}
 
       true ->
         handle_queue_fetch(torrent)
@@ -406,7 +423,11 @@ defmodule ProcessingQueue.Processor do
         trigger_servarr_refresh(torrent)
         Process.sleep(2000)
 
-        case ServarrSync.get_expected_file_count(torrent.servarr_url, torrent.servarr_api_key, torrent.hash) do
+        case ServarrSync.get_expected_file_count(
+               torrent.servarr_url,
+               torrent.servarr_api_key,
+               torrent.hash
+             ) do
           {:ok, count} -> %{torrent | expected_files: count}
           {:error, _} -> torrent
         end
@@ -418,7 +439,11 @@ defmodule ProcessingQueue.Processor do
   end
 
   defp handle_queue_fetch(torrent) do
-    case ServarrSync.get_expected_file_count(torrent.servarr_url, torrent.servarr_api_key, torrent.hash) do
+    case ServarrSync.get_expected_file_count(
+           torrent.servarr_url,
+           torrent.servarr_api_key,
+           torrent.hash
+         ) do
       {:ok, count} ->
         updated = %{torrent | expected_files: count}
         {:ok, Torrent.transition(updated, :waiting_download)}
@@ -430,7 +455,9 @@ defmodule ProcessingQueue.Processor do
         {:wait, 3000, torrent}
 
       {:error, reason} ->
-        failure = FailureHandler.build_failure(:warning, "Servarr API error: #{inspect(reason)}", %{})
+        failure =
+          FailureHandler.build_failure(:warning, "Servarr API error: #{inspect(reason)}", %{})
+
         {:error, "Failed to fetch Servarr history", apply_failure(torrent, failure)}
     end
   end
