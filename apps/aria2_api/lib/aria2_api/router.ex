@@ -100,11 +100,11 @@ defmodule Aria2Api.Router do
 
         case validate_secret(secret) do
           :ok ->
-            result = dispatch_method(method, params, nil)
+            result = safe_dispatch_method(method, params, nil)
             send_xmlrpc_response(conn, result)
 
           {:ok, servarr_credentials} ->
-            result = dispatch_method(method, params, servarr_credentials)
+            result = safe_dispatch_method(method, params, servarr_credentials)
             send_xmlrpc_response(conn, result)
 
           {:error, message} ->
@@ -114,6 +114,20 @@ defmodule Aria2Api.Router do
       {:error, reason} ->
         Logger.warning("XML-RPC parse error: #{reason}")
         send_xmlrpc_fault(conn, -32700, "Parse error: #{reason}")
+    end
+  end
+
+  defp safe_dispatch_method(method, params, creds) do
+    try do
+      dispatch_method(method, params, creds)
+    rescue
+      e ->
+        Logger.error("Exception in #{method}: #{Exception.format(:error, e, __STACKTRACE__)}")
+        {:error, 1, "Internal error: #{Exception.message(e)}"}
+    catch
+      kind, value ->
+        Logger.error("Caught #{kind} in #{method}: #{inspect(value)}")
+        {:error, 1, "Internal error: #{inspect(value)}"}
     end
   end
 
@@ -203,10 +217,11 @@ defmodule Aria2Api.Router do
   defp dispatch_method("aria2.getGlobalStat", _params, _creds), do: System.get_global_stat()
 
   defp dispatch_method("aria2.getVersion", _params, creds) do
-    # Validate credentials during getVersion (called by Sonarr/Radarr test button)
-    case System.validate_credentials(creds) do
+    # Validate credentials during getVersion (called by Sonarr/Radarr health checks and test button)
+    # Uses cached validation to avoid repeatedly calling Servarr API during health checks
+    case System.validate_credentials_cached(creds) do
       {:ok, _result} ->
-        # Credentials valid, return version info
+        # Credentials valid (or previously validated), return version info
         System.get_version()
 
       {:error, code, message} ->

@@ -23,14 +23,33 @@ defmodule ProcessingQueue.TorrentParser do
   """
   @spec extract_infohash(binary()) :: {:ok, String.t()} | {:error, term()}
   def extract_infohash(torrent_data) when is_binary(torrent_data) do
-    with {:ok, decoded} <- Bento.decode(torrent_data),
+    with {:ok, decoded} <- safe_decode(torrent_data),
          {:ok, info_dict} <- get_info_dict(decoded),
-         {:ok, info_encoded} <- Bento.encode(info_dict),
+         {:ok, info_encoded} <- safe_encode(info_dict),
          hash <- compute_sha1(info_encoded) do
       {:ok, hash}
     else
       {:error, reason} -> {:error, reason}
       _ -> {:error, "Failed to parse torrent file"}
+    end
+  rescue
+    e ->
+      {:error, "Exception parsing torrent: #{Exception.message(e)}"}
+  end
+
+  defp safe_decode(data) do
+    try do
+      Bento.decode(data)
+    rescue
+      e -> {:error, "Bento decode failed: #{Exception.message(e)}"}
+    end
+  end
+
+  defp safe_encode(data) do
+    try do
+      Bento.encode(data)
+    rescue
+      e -> {:error, "Bento encode failed: #{Exception.message(e)}"}
     end
   end
 

@@ -50,13 +50,11 @@ config :media_validator,
     "wmv",
     "webm"
   ],
-  # 500MB
-  min_file_size_bytes: 500 * 1024 * 1024,
   require_video_stream: true,
   require_audio_stream: true,
   reject_sample_files: false,
-  # 5 minutes
-  sample_min_runtime: 300,
+  # 10 Minutes
+  sample_min_runtime: 600,
   ffprobe_timeout: 30_000
 
 config :logger, level: :debug
