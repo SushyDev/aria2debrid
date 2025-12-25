@@ -478,6 +478,14 @@ defmodule Aria2Api.Handlers.Downloads do
 
   defp calculate_completed_length(%Torrent{state: :success, size: size}), do: size
 
+  # Validation states should show minimal progress (1 byte) to appear in Sonarr Activity
+  # but not 100% to prevent "Downloaded - Waiting to Import" status
+  # Sonarr filters out downloads with 0% progress from the Activity view
+  defp calculate_completed_length(%Torrent{state: state, size: size})
+       when state in [:validating_count, :validating_media, :validating_path] and size > 0 do
+    1
+  end
+
   defp calculate_completed_length(%Torrent{size: size, progress: progress}) when size > 0 do
     round(size * progress / 100.0)
   end
