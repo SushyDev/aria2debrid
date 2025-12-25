@@ -18,9 +18,7 @@ config :processing_queue,
   additional_selectable_files: ["srt"],
   failed_retention: :timer.seconds(5),
   cleanup_interval: :timer.seconds(1),
-  queue_fetch_retries: 2,
   metadata_timeout: :timer.seconds(10),
-  path_validation_retries: 1,
   path_validation_delay: 100
 
 # Media validation config - disabled for faster tests

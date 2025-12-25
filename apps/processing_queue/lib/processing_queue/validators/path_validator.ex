@@ -48,28 +48,25 @@ defmodule ProcessingQueue.Validators.PathValidator do
   @doc """
   Validates that torrent paths exist with retries.
 
-  Retries up to `max_retries` times with `delay_ms` between attempts.
-  Default is 1000 retries with 10 second delay (approximately 2.7 hours).
+  Retries indefinitely with configurable delay between attempts.
+  This is appropriate because rclone mounts may take variable time to sync.
 
   ## Parameters
     - `torrent` - Torrent struct with save_path
     - `opts` - Options:
-      - `:max_retries` - Maximum retry attempts (default from config)
       - `:delay_ms` - Delay between retries in ms (default from config)
 
   ## Returns
     - `:ok` - Paths exist
-    - `{:error, reason}` - Paths not found after all retries
+    - `{:skip, reason}` - Validation disabled
   """
-  @spec validate_with_retry(Torrent.t(), keyword()) :: :ok | {:error, term()}
+  @spec validate_with_retry(Torrent.t(), keyword()) :: :ok | {:skip, String.t()}
   def validate_with_retry(%Torrent{} = torrent, opts \\ []) do
     if not Aria2Debrid.Config.validate_paths?() do
       {:skip, "Path validation disabled"}
     else
-      max_retries = Keyword.get(opts, :max_retries, Aria2Debrid.Config.path_validation_retries())
       delay_ms = Keyword.get(opts, :delay_ms, Aria2Debrid.Config.path_validation_delay())
-
-      do_validate_with_retry(torrent, 0, max_retries, delay_ms)
+      do_validate_with_retry(torrent, delay_ms)
     end
   end
 
@@ -138,29 +135,14 @@ defmodule ProcessingQueue.Validators.PathValidator do
     end
   end
 
-  defp do_validate_with_retry(torrent, attempt, max_retries, delay_ms) do
-    hash = torrent.hash
-
+  defp do_validate_with_retry(torrent, delay_ms) do
     case do_validate(torrent) do
       :ok ->
         :ok
 
-      {:error, reason} when attempt >= max_retries ->
-        Logger.warning(
-          "[#{hash}] Path validation failed after #{max_retries} attempts: #{inspect(reason)}"
-        )
-
-        {:error, {:max_retries_exceeded, reason}}
-
-      {:error, reason} ->
-        if rem(attempt, 10) == 0 do
-          Logger.debug(
-            "[#{hash}] Path not ready (attempt #{attempt + 1}/#{max_retries}): #{inspect(reason)}"
-          )
-        end
-
+      {:error, _reason} ->
         Process.sleep(delay_ms)
-        do_validate_with_retry(torrent, attempt + 1, max_retries, delay_ms)
+        do_validate_with_retry(torrent, delay_ms)
     end
   end
 end

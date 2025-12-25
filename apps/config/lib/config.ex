@@ -82,27 +82,11 @@ defmodule Aria2Debrid.Config do
   end
 
   @doc """
-  Number of retries when fetching Servarr queue.
-  """
-  @spec queue_fetch_retries() :: non_neg_integer()
-  def queue_fetch_retries do
-    get_env(:processing_queue, :queue_fetch_retries, 5)
-  end
-
-  @doc """
   Timeout for waiting for torrent metadata (milliseconds).
   """
   @spec metadata_timeout() :: pos_integer()
   def metadata_timeout do
     get_env(:processing_queue, :metadata_timeout, :timer.minutes(2))
-  end
-
-  @doc """
-  Number of retries for path validation.
-  """
-  @spec path_validation_retries() :: non_neg_integer()
-  def path_validation_retries do
-    get_env(:processing_queue, :path_validation_retries, 1000)
   end
 
   @doc """

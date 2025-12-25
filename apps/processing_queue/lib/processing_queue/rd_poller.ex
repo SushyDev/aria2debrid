@@ -26,9 +26,6 @@ defmodule ProcessingQueue.RDPoller do
 
   require Logger
 
-  @default_poll_interval 5_000
-  @default_max_retries 60
-
   @doc """
   Polls Real-Debrid for torrent info.
 
@@ -103,57 +100,6 @@ defmodule ProcessingQueue.RDPoller do
       other_status ->
         Logger.debug("Unknown RD status: #{other_status}, treating as downloading")
         {:downloading, info}
-    end
-  end
-
-  @doc """
-  Polls for metadata until files are available or error occurs.
-
-  This is used during the WAITING_METADATA state.
-
-  ## Options
-    - `:poll_interval` - Delay between polls (default: 5000ms)
-    - `:max_retries` - Maximum poll attempts (default: 60)
-
-  ## Returns
-    - `{:ok, info}` - Files are ready (waiting_files_selection or downloaded)
-    - `{:error, reason}` - Terminal error or timeout
-  """
-  @spec poll_metadata(RealDebrid.Client.t(), String.t(), keyword()) ::
-          {:ok, struct()} | {:error, term()}
-  def poll_metadata(client, rd_id, opts \\ []) do
-    poll_interval = Keyword.get(opts, :poll_interval, @default_poll_interval)
-    max_retries = Keyword.get(opts, :max_retries, @default_max_retries)
-
-    do_poll_metadata(client, rd_id, 0, max_retries, poll_interval)
-  end
-
-  defp do_poll_metadata(_client, _rd_id, attempts, max_retries, _interval)
-       when attempts >= max_retries do
-    {:error, :timeout}
-  end
-
-  defp do_poll_metadata(client, rd_id, attempts, max_retries, interval) do
-    case get_torrent_info(client, rd_id) do
-      {:ok, info} ->
-        case check_status(info) do
-          {:ready, info} ->
-            {:ok, info}
-
-          {:downloaded, info} ->
-            {:ok, info}
-
-          {:downloading, _info} ->
-            Process.sleep(interval)
-            do_poll_metadata(client, rd_id, attempts + 1, max_retries, interval)
-
-          {:error, reason, _info} ->
-            {:error, reason}
-        end
-
-      {:error, _reason} ->
-        Process.sleep(interval)
-        do_poll_metadata(client, rd_id, attempts + 1, max_retries, interval)
     end
   end
 

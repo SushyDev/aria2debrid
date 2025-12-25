@@ -418,23 +418,16 @@ defmodule ProcessingQueue.Processor do
   end
 
   defp handle_queue_fetch(torrent) do
-    max_retries = 5
-
     case ServarrSync.get_expected_file_count(torrent.servarr_url, torrent.servarr_api_key, torrent.hash) do
       {:ok, count} ->
-        updated = %{torrent | expected_files: count, retry_count: 0}
+        updated = %{torrent | expected_files: count}
         {:ok, Torrent.transition(updated, :waiting_download)}
 
       {:error, :history_empty} ->
-        if torrent.retry_count < max_retries do
-          Logger.warning(
-            "[#{torrent.hash}] History empty, retrying (#{torrent.retry_count + 1}/#{max_retries})"
-          )
-          {:wait, 3000, %{torrent | retry_count: torrent.retry_count + 1}}
-        else
-          failure = FailureHandler.build_failure(:warning, "History empty after #{max_retries} retries", %{})
-          {:error, "Servarr history empty after retries", apply_failure(torrent, failure)}
-        end
+        # History not populated yet - wait and retry indefinitely
+        # Sonarr may take a moment to add the grab to history
+        Logger.debug("[#{torrent.hash}] History empty, waiting 3s before retry")
+        {:wait, 3000, torrent}
 
       {:error, reason} ->
         failure = FailureHandler.build_failure(:warning, "Servarr API error: #{inspect(reason)}", %{})
@@ -471,22 +464,15 @@ defmodule ProcessingQueue.Processor do
 
   defp validate_path_with_retry(torrent) do
     save_path = torrent.save_path
-    max_retries = Aria2Debrid.Config.path_validation_retries()
 
     if save_path && File.exists?(save_path) && path_has_files?(save_path) do
       Logger.info("[#{torrent.hash}] Path validated: #{save_path}")
       {:ok, Torrent.transition(torrent, :success)}
     else
-      if torrent.retry_count >= max_retries do
-        reason = "Path not found after #{max_retries} retries: #{save_path}"
-        failure = FailureHandler.build_failure(:validation, reason, %{})
-        {:error, reason, apply_failure(torrent, failure)}
-      else
-        Logger.debug(
-          "[#{torrent.hash}] Path not ready (attempt #{torrent.retry_count + 1}/#{max_retries}): #{save_path}"
-        )
-        {:wait, Aria2Debrid.Config.path_validation_delay(), %{torrent | retry_count: torrent.retry_count + 1}}
-      end
+      # Path not ready yet - wait and retry indefinitely
+      # rclone mount may take time to populate after RD download completes
+      Logger.debug("[#{torrent.hash}] Path not ready, waiting: #{save_path}")
+      {:wait, Aria2Debrid.Config.path_validation_delay(), torrent}
     end
   end
 
