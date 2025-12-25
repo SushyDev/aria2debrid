@@ -21,7 +21,6 @@ erl_crash.dump
 
 # direnv environment variables
 .direnv/
-.envrc
 
 # Environment files
 .env
@@ -56,6 +55,7 @@ result-*
 # Ignore readonly reference code
 aria2_readonly_reference_code/
 sonarr_readonly_reference_code/
+radarr_readonly_reference_code/
 reference/
 
 # Working/scratch files

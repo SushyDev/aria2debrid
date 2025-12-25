@@ -1,0 +1,860 @@
+---
+config:
+  theme: default
+  look: neo
+  layout: elk
+---
+flowchart TB
+    %% ============================================================================
+    %% COMPLETE SYSTEM ARCHITECTURE
+    %% ============================================================================
+    %% This diagram shows the complete aria2debrid system:
+    %% - API Layer: XML-RPC request handling
+    %% - Producer Layer: Fast GID generation
+    %% - Queue Consumer: FSM state machine (detailed)
+    %% - Status Reporting: Query responses with multi-tenant filtering
+    %% - Side Operations: Manual remove, automatic cleanup
+    %% ============================================================================
+    
+    %% ============================================================================
+    %% API LAYER - XML-RPC Request Handling
+    %% ============================================================================
+    subgraph API["API LAYER - XML-RPC"]
+        direction TB
+        
+        subgraph API_Entry["A. Request Entry"]
+            direction LR
+            APIStart(["Sonarr/Radarr<br/>XML-RPC Request"])
+            APIRouter["Router: POST /rpc"]
+            APIParseXML{"Parse XML-RPC"}
+            APIFault["XML-RPC Fault Response"]
+            
+            APIStart --> APIRouter --> APIParseXML
+            APIParseXML -- Fail --> APIFault
+        end
+        
+        subgraph API_Auth["B. Authentication"]
+            direction LR
+            APIExtractSecret["Extract SecretToken<br/>(url|api_key format)"]
+            APIValidateSecret{"Valid format?"}
+            APIStoreCreds["Store Servarr credentials"]
+            
+            APIExtractSecret --> APIValidateSecret
+            APIValidateSecret -- Yes --> APIStoreCreds
+        end
+        
+        subgraph API_Dispatch["C. Method Dispatch"]
+            direction LR
+            APIDispatch{"Method Name?"}
+            APIVersion["aria2.getVersion"]
+            APIAddUri["aria2.addUri"]
+            APIAddTorrent["aria2.addTorrent"]
+            APIRemove["aria2.remove/<br/>forceRemove/<br/>removeDownloadResult"]
+            APIQuery["aria2.tellStatus/<br/>tellActive/<br/>tellWaiting/<br/>tellStopped"]
+            APISystem["system.*/aria2.get*"]
+            
+            APIDispatch -- "getVersion" --> APIVersion
+            APIDispatch -- "addUri" --> APIAddUri
+            APIDispatch -- "addTorrent" --> APIAddTorrent
+            APIDispatch -- "remove*" --> APIRemove
+            APIDispatch -- "tell*" --> APIQuery
+            APIDispatch -- "system/get*" --> APISystem
+        end
+        
+        subgraph API_Response["D. Response Encoding"]
+            direction LR
+            APIEncode["Encode XML-RPC Response"]
+            APISend(["HTTP 200 Response"])
+            
+            APIEncode --> APISend
+        end
+        
+        API_Entry --> API_Auth --> API_Dispatch --> API_Response
+    end
+    
+    APIParseXML -- Success --> APIExtractSecret
+    APIValidateSecret -- No --> APIFault
+    APIFault --> APISend
+    APIVersion --> APIEncode
+    APISystem --> APIEncode
+    
+    %% ============================================================================
+    %% PRODUCER LAYER - Fast GID Generation
+    %% ============================================================================
+    subgraph PRODUCER["PRODUCER LAYER - Fast GID Generation"]
+        direction TB
+        
+        subgraph PROD_Extract["A. Extract Torrent Data"]
+            direction LR
+            ProdExtractMagnet["Extract Magnet URI"]
+            ProdExtractTorrent["Extract Base64 Torrent"]
+            ProdStore["Store torrent data"]
+            
+            ProdExtractMagnet --> ProdStore
+            ProdExtractTorrent --> ProdStore
+        end
+        
+        subgraph PROD_Dupe["B. Duplicate Check"]
+            direction LR
+            ProdCheckDupe{"Torrent exists?"}
+            ProdNew["New torrent"]
+            ProdProcessing["Processing: reject"]
+            ProdTerminal["Terminal state: remove & re-add"]
+            
+            ProdCheckDupe -- New --> ProdNew
+            ProdCheckDupe -- Processing --> ProdProcessing
+            ProdCheckDupe -- Terminal --> ProdTerminal
+        end
+        
+        subgraph PROD_Create["C. Create Processor"]
+            direction LR
+            ProdSpawn["Spawn Processor GenServer"]
+            ProdGetPID["Get Process PID"]
+            ProdGenGID["Generate GID from PID<br/>(16-char hex)"]
+            ProdRegister["Register GID → hash<br/>in GidRegistry"]
+            ProdCreateStruct["Create Torrent struct<br/>(state: pending)"]
+            ProdStoreCreds["Store Servarr credentials"]
+            ProdSuccess(["Return GID to Sonarr"])
+            
+            ProdSpawn --> ProdGetPID --> ProdGenGID --> ProdRegister
+            ProdRegister --> ProdCreateStruct --> ProdStoreCreds --> ProdSuccess
+        end
+        
+        PROD_Extract --> PROD_Dupe --> PROD_Create
+    end
+    
+    APIAddUri ==> ProdExtractMagnet
+    APIAddTorrent ==> ProdExtractTorrent
+    ProdProcessing -.-> ProdReject(["Return Error:<br/>Already exists"])
+    ProdReject ==> APIEncode
+    ProdTerminal --> ProdSpawn
+    ProdSuccess ==> APIEncode
+    
+    %% ============================================================================
+    %% QUEUE CONSUMER - STATE MACHINE
+    %% ============================================================================
+    subgraph QUEUE["QUEUE CONSUMER - FSM State Machine"]
+        direction TB
+        QueueEntry["Processor spawned → FSM starts"]
+    end
+    
+    ProdSpawn =====> QueueEntry
+    QueueEntry --> State_Pending
+    
+    %% ============================================================================
+    %% STATE: PENDING
+    %% ============================================================================
+    subgraph State_Pending["① FSM State: PENDING"]
+        direction TB
+        S1_Entry["Initial state<br/>Torrent struct created<br/>GID registered"]
+        S1_Next["Transition to :adding_rd"]
+    end
+    
+    State_Pending --> State_Adding
+    
+    %% ============================================================================
+    %% STATE: ADDING_RD
+    %% ============================================================================
+    subgraph State_Adding["② FSM State: ADDING_RD"]
+        direction TB
+        
+        subgraph S2_Parse["A. Parse Torrent/Magnet"]
+            direction LR
+            S2P1["TorrentParser.parse(data)"]
+            S2P2{"Is Magnet?"}
+            S2P3["Extract xt=urn:btih param"]
+            S2P4["Bento.decode → info dict<br/>→ Bento.encode → SHA1"]
+            S2P5{"Parse OK?"}
+            S2P6["InfoHash extracted"]
+            S2P7["Parse Error"]
+            
+            S2P1 --> S2P2
+            S2P2 -- Yes --> S2P3 --> S2P5
+            S2P2 -- No --> S2P4 --> S2P5
+            S2P5 -- Yes --> S2P6
+            S2P5 -- No --> S2P7
+        end
+        
+        subgraph S2_Add["B. Add to Real-Debrid"]
+            direction LR
+            S2A1["RealDebrid.add_magnet(uri)"]
+            S2A2{"Success?"}
+            S2A3["Store rd_id"]
+            S2A4["ErrorClassifier.classify(error)"]
+            S2A5{"Error Type?"}
+            S2A6["Raise Exception<br/>(:application)"]
+            S2A7["failure_type: :permanent"]
+            S2A8["failure_type: :validation"]
+            S2A9["failure_type: :warning"]
+            
+            S2A1 --> S2A2
+            S2A2 -- Yes --> S2A3
+            S2A2 -- No --> S2A4 --> S2A5
+            S2A5 -- ":application" --> S2A6
+            S2A5 -- ":permanent" --> S2A7
+            S2A5 -- ":validation" --> S2A8
+            S2A5 -- ":warning" --> S2A9
+        end
+        
+        S2_Parse --> S2_Add
+        S2A3["Transition to :waiting_metadata"]
+    end
+    
+    S2P7 --> Fail_Parse["failure_type: :permanent<br/>'Invalid torrent/magnet'"] --> Terminal_Failed
+    S2A6 -.-> AppError[["System Crash"]]
+    S2A7 --> Terminal_Failed
+    S2A8 --> Terminal_Failed
+    S2A9 --> Terminal_Failed
+    State_Adding --> State_WaitMeta
+    
+    %% ============================================================================
+    %% STATE: WAITING_METADATA
+    %% ============================================================================
+    subgraph State_WaitMeta["③ FSM State: WAITING_METADATA"]
+        direction TB
+        
+        subgraph S3_Poll["A. Poll for Metadata"]
+            direction LR
+            S3P1["RealDebrid.get_torrent_info(rd_id)"]
+            S3P2{"API Success?"}
+            S3P3["Wait 5s, retry"]
+            S3P4["Got torrent info"]
+            
+            S3P1 --> S3P2
+            S3P2 -- No --> S3P3 --> S3P1
+            S3P2 -- Yes --> S3P4
+        end
+        
+        subgraph S3_Check["B. Check RD Status"]
+            direction LR
+            S3C1{"RD Status?"}
+            S3C2["waiting_files_selection<br/>→ Update files/bytes"]
+            S3C3["magnet_error"]
+            S3C4["error"]
+            S3C5["dead"]
+            S3C6["other (downloading/queued)"]
+            
+            S3C1 -- "ready" --> S3C2
+            S3C1 -- "magnet_error" --> S3C3
+            S3C1 -- "error" --> S3C4
+            S3C1 -- "dead" --> S3C5
+            S3C1 -- "other" --> S3C6
+        end
+        
+        S3_Poll --> S3_Check
+    end
+    
+    S3C2 --> State_SelectFiles
+    S3C3 --> Fail_Magnet["failure_type: :permanent<br/>'Magnet error'"] --> Terminal_Failed
+    S3C4 --> Fail_RDError["failure_type: :permanent<br/>'RD error'"] --> Terminal_Failed
+    S3C5 --> Fail_Dead["failure_type: :permanent<br/>'Dead torrent'"] --> Terminal_Failed
+    S3C6 --> State_WaitDL
+    
+    %% ============================================================================
+    %% STATE: SELECTING_FILES
+    %% ============================================================================
+    subgraph State_SelectFiles["④ FSM State: SELECTING_FILES"]
+        direction TB
+        
+        subgraph S4_Files["A. Ensure Files Available"]
+            direction LR
+            S4F1{"Files populated?"}
+            S4F2["Re-query torrent info"]
+            S4F3{"Files available?"}
+            S4F4["Wait 2s"]
+            S4F5["Files ready"]
+            
+            S4F1 -- No --> S4F2 --> S4F3
+            S4F3 -- No --> S4F4 --> S4F1
+            S4F1 -- Yes --> S4F5
+            S4F3 -- Yes --> S4F5
+        end
+        
+        subgraph S4_Filter["B. Filter & Select"]
+            direction LR
+            S4S1["FileSelector.filter(files)<br/>• Video: mkv, mp4, avi...<br/>• Subs: srt, sub, idx<br/>• Meta: nfo, jpg<br/>• Min size check"]
+            S4S2["Build selected_file_ids list"]
+            S4S3["RealDebrid.select_files(rd_id, ids)"]
+            S4S4{"Success?"}
+            S4S5["Log error, wait 2s"]
+            S4S6["Selection complete"]
+            
+            S4S1 --> S4S2 --> S4S3 --> S4S4
+            S4S4 -- Yes --> S4S6
+            S4S4 -- No --> S4S5 --> S4S1
+        end
+        
+        S4_Files --> S4_Filter
+    end
+    
+    State_SelectFiles --> State_Refresh
+    
+    %% ============================================================================
+    %% STATE: REFRESHING_INFO
+    %% ============================================================================
+    subgraph State_Refresh["⑤ FSM State: REFRESHING_INFO"]
+        direction TB
+        
+        subgraph S5_Refresh["A. Update After Selection"]
+            direction LR
+            S5R1["RealDebrid.get_torrent_info(rd_id)"]
+            S5R2{"API Success?"}
+            S5R3["Wait 2s, retry"]
+            S5R4["Update files with selected status"]
+            
+            S5R1 --> S5R2
+            S5R2 -- No --> S5R3 --> S5R1
+            S5R2 -- Yes --> S5R4
+        end
+    end
+    
+    State_Refresh --> State_WaitDL
+    
+    %% ============================================================================
+    %% STATE: WAITING_DOWNLOAD
+    %% ============================================================================
+    subgraph State_WaitDL["⑥ FSM State: WAITING_DOWNLOAD"]
+        direction TB
+        
+        subgraph S6_Config["A. Check Config"]
+            direction LR
+            S6CFG["Config.get(:require_downloaded)"]
+        end
+        
+        subgraph S6_Poll["B. Poll Until Downloaded"]
+            direction LR
+            S6P1["RealDebrid.get_torrent_info(rd_id)"]
+            S6P2{"API Success?"}
+            S6P3["Wait 5s"]
+            S6P4{"Status = downloaded?"}
+            S6P5["Download complete"]
+            
+            S6P1 --> S6P2
+            S6P2 -- No --> S6P3 --> S6P1
+            S6P2 -- Yes --> S6P4
+            S6P4 -- Yes --> S6P5
+        end
+        
+        subgraph S6_Check["C. Handle Not Downloaded"]
+            direction LR
+            S6C1{"require_downloaded?"}
+            S6C2["Retry (wait 5s)"]
+            S6C3["Fail: download required"]
+            
+            S6C1 -- false --> S6C2
+            S6C1 -- true --> S6C3
+        end
+        
+        S6_Config --> S6_Poll
+        S6_Poll --> S6_Check
+    end
+    
+    S6P4 -- No --> S6_Check
+    S6C2 --> S6P3
+    S6C3 --> Fail_NotDL["failure_type: :validation<br/>Notify Servarr<br/>'Download incomplete'"] --> Terminal_Failed
+    S6P5 --> State_ValidateCount
+    
+    %% ============================================================================
+    %% STATE: VALIDATING_FILE_COUNT
+    %% ============================================================================
+    subgraph State_ValidateCount["⑦ FSM State: VALIDATING_FILE_COUNT"]
+        direction TB
+        
+        subgraph S7_Config["A. Check Config"]
+            direction LR
+            S7CFG["Config.get(:file_count_validation)"]
+            S7C1{"file_count_validation<br/>enabled?"}
+            S7C2["Config disabled: skip"]
+            S7C3{"Has Servarr<br/>credentials?"}
+            
+            S7CFG --> S7C1
+            S7C1 -- No --> S7C2
+            S7C1 -- Yes --> S7C3
+        end
+        
+        subgraph S7_Fetch["B. Fetch Expected Count"]
+            direction LR
+            S7F1["ServarrSync.refresh()"]
+            S7F2["Wait 2s"]
+            S7F3["ServarrClient.get_history(infohash)"]
+            S7F4{"API Result?"}
+            S7F5["Extract expected_file_count<br/>from history.data"]
+            S7F6["Wait 5s, retry"]
+            S7F7["Network/Auth Error"]
+            S7F8["Empty list returned"]
+            
+            S7F1 --> S7F2 --> S7F3 --> S7F4
+            S7F4 -- "entry found" --> S7F5
+            S7F4 -- "empty list" --> S7F8
+            S7F4 -- "not found yet" --> S7F6 --> S7F3
+            S7F4 -- "error" --> S7F7
+        end
+        
+        subgraph S7_Validate["C. Compare Counts"]
+            direction LR
+            S7V1["Count selected video files"]
+            S7V2["actual_count = ?"]
+            S7V3{"actual >= expected?"}
+            S7V4["Count validation passed"]
+            
+            S7V1 --> S7V2 --> S7V3
+            S7V3 -- Yes --> S7V4
+        end
+        
+        S7_Config --> S7_Fetch
+        S7_Fetch --> S7_Validate
+    end
+    
+    S7C2 --> State_ValidateMedia
+    S7C3 -- No --> Fail_NoCreds["failure_type: :application<br/>Raise Exception<br/>'Missing Servarr credentials'"] -.-> AppError
+    S7F7 --> Fail_ServarrAPI["failure_type: :application<br/>Raise Exception<br/>'Servarr API error'"] -.-> AppError
+    S7F8 --> Fail_EmptyHistory["failure_type: :validation<br/>Notify Servarr (code 24)<br/>'Not found in history'"] --> Terminal_Failed
+    S7V3 -- No --> Fail_CountMismatch["failure_type: :validation<br/>Notify Servarr (code 24)<br/>'File count mismatch'"] --> Terminal_Failed
+    S7V4 --> State_ValidateMedia
+    
+    %% ============================================================================
+    %% STATE: VALIDATING_MEDIA
+    %% ============================================================================
+    subgraph State_ValidateMedia["⑧ FSM State: VALIDATING_MEDIA"]
+        direction TB
+        
+        subgraph S8_Config["A. Check Config"]
+            direction LR
+            S8CFG["Config.get(:media_validation)"]
+            S8C1{"media_validation<br/>enabled?"}
+            S8C2["Config disabled: skip"]
+            S8C3["Reset retry_count"]
+            
+            S8CFG --> S8C1
+            S8C1 -- No --> S8C2
+            S8C1 -- Yes --> S8C3
+        end
+        
+        subgraph S8_Validate["B. FFprobe Each File"]
+            direction LR
+            S8V1["Get selected video files"]
+            S8V2["For each file:"]
+            S8V3["• Size >= min_size_bytes?"]
+            S8V4["• Filename not 'sample'?"]
+            S8V5["• Get RD streaming link"]
+            S8V6["• FFprobe.probe(stream_url)"]
+            S8V7["• Has video stream?"]
+            S8V8["• Has audio stream?"]
+            S8V9["• Duration >= 10min?"]
+            S8V10{"All files valid?"}
+            S8V11["Media validation passed"]
+            
+            S8V1 --> S8V2 --> S8V3 --> S8V4 --> S8V5 --> S8V6
+            S8V6 --> S8V7 --> S8V8 --> S8V9 --> S8V10
+            S8V10 -- Yes --> S8V11
+        end
+        
+        S8_Config --> S8_Validate
+    end
+    
+    S8C2 --> State_ValidatePath
+    S8V10 -- No --> Fail_MediaInvalid["failure_type: :validation<br/>Notify Servarr (code 24)<br/>'Media validation failed'"] --> Terminal_Failed
+    S8V11 --> State_ValidatePath
+    
+    %% ============================================================================
+    %% STATE: VALIDATING_PATH
+    %% ============================================================================
+    subgraph State_ValidatePath["⑨ FSM State: VALIDATING_PATH"]
+        direction TB
+        
+        subgraph S9_Config["A. Check Config"]
+            direction LR
+            S9CFG["Config.get(:validate_paths)"]
+            S9C1{"validate_paths<br/>enabled?"}
+            S9C2["Config disabled: skip"]
+            S9C3["Check save_path exists<br/>and has files"]
+            
+            S9CFG --> S9C1
+            S9C1 -- No --> S9C2
+            S9C1 -- Yes --> S9C3
+        end
+        
+        subgraph S9_Validate["B. Wait for Path"]
+            direction LR
+            S9V1{"Path ready?"}
+            S9V2["Wait 5s"]
+            S9V3["Path validation passed"]
+            
+            S9V1 -- Yes --> S9V3
+            S9V1 -- No --> S9V2 --> S9C3
+        end
+        
+        S9_Config --> S9_Validate
+    end
+    
+    S9C2 --> Terminal_Success
+    S9V3 --> Terminal_Success
+    
+    %% ============================================================================
+    %% TERMINAL STATE: SUCCESS
+    %% ============================================================================
+    subgraph Terminal_Success["✓ TERMINAL: SUCCESS"]
+        direction TB
+        T1["FSM: success"]
+        T2["Set completed_at timestamp"]
+        T3["Torrent ready for Sonarr/Radarr import"]
+        T4["Stop Processor GenServer"]
+        
+        T1 --> T2 --> T3 --> T4
+    end
+    
+    Terminal_Success --> End_Success(["Completed"])
+    
+    %% ============================================================================
+    %% TERMINAL STATE: FAILED
+    %% ============================================================================
+    subgraph Terminal_Failed["✗ TERMINAL: FAILED"]
+        direction TB
+        
+        subgraph TF_Enter["A. Enter Failed State"]
+            direction LR
+            TF1["FSM: failed"]
+            TF2["Set failed_at timestamp"]
+            TF3["Get failure_type<br/>(set earlier in flow)"]
+            
+            TF1 --> TF2 --> TF3
+        end
+        
+        subgraph TF_Cleanup["B. Cleanup Strategy"]
+            direction LR
+            TF4{"failure_type?"}
+            TF5[":permanent<br/>→ Cleanup RD immediately"]
+            TF6[":validation<br/>→ Keep RD<br/>→ Already notified Servarr"]
+            TF7[":warning<br/>→ Keep RD<br/>→ May recover"]
+            
+            TF4 -- ":permanent" --> TF5
+            TF4 -- ":validation" --> TF6
+            TF4 -- ":warning" --> TF7
+        end
+        
+        subgraph TF_Stop["C. Stop Processor"]
+            direction LR
+            TF8["Stop Processor GenServer"]
+            TF9["Torrent visible in tellStopped<br/>for 5 minutes (retention period)"]
+        end
+        
+        TF_Enter --> TF_Cleanup --> TF_Stop
+    end
+    
+    Terminal_Failed --> End_Failed(["Failed"])
+    
+    %% ============================================================================
+    %% STATUS REPORTING LAYER - Query Responses
+    %% ============================================================================
+    subgraph STATUS["STATUS REPORTING LAYER - Query Responses"]
+        direction TB
+        
+        subgraph STATUS_Entry["A. Query Entry"]
+            direction LR
+            STATQueryType{"Query Type?"}
+            STATSingle["tellStatus<br/>(single GID)"]
+            STATList["tellActive/<br/>tellWaiting/<br/>tellStopped"]
+            
+            STATQueryType -- "single" --> STATSingle
+            STATQueryType -- "list" --> STATList
+        end
+        
+        subgraph STATUS_Single["B. Single Status"]
+            direction LR
+            STATLookupGID["GidRegistry.lookup_hash(gid)"]
+            STATGIDFound{"GID exists?"}
+            STATNotFound(["Return Error:<br/>GID not found"])
+            STATGetTorrent["Manager.get_torrent(hash)"]
+            STATBuildSingle["Build aria2 status object"]
+            
+            STATLookupGID --> STATGIDFound
+            STATGIDFound -- No --> STATNotFound
+            STATGIDFound -- Yes --> STATGetTorrent --> STATBuildSingle
+        end
+        
+        subgraph STATUS_List["C. List Status (Multi-Tenant)"]
+            direction LR
+            STATCheckCreds{"Has Servarr<br/>credentials?"}
+            STATNoCreds(["Return Error:<br/>Missing credentials"])
+            STATFetchGrabbed["Fetch Servarr grabbed history<br/>(ServarrSync)"]
+            STATGetAll["Get all torrents<br/>from Manager"]
+            STATFilter["Filter: infohash in<br/>grabbed_ids"]
+            STATIterate["Iterate filtered torrents"]
+            
+            STATCheckCreds -- No --> STATNoCreds
+            STATCheckCreds -- Yes --> STATFetchGrabbed
+            STATFetchGrabbed --> STATGetAll --> STATFilter --> STATIterate
+        end
+        
+        subgraph STATUS_Map["D. Map FSM State to aria2 Status"]
+            direction LR
+            STATMapState{"Torrent<br/>FSM State?"}
+            STATSuccess["status: complete<br/>completedLength = totalLength"]
+            STATFailVal["status: error<br/>errorCode: 24<br/>(:validation)"]
+            STATFailPerm["status: error<br/>errorCode: 1<br/>(:permanent)"]
+            STATFailWarn["status: active<br/>completedLength: 0<br/>(:warning - appears stalled)"]
+            STATWaiting["status: waiting<br/>completedLength: 0<br/>(pending/adding_rd)"]
+            STATActive["status: active<br/>completedLength from RD<br/>(waiting_*/validating_*)"]
+            
+            STATMapState -- ":success" --> STATSuccess
+            STATMapState -- ":failed + :validation" --> STATFailVal
+            STATMapState -- ":failed + :permanent" --> STATFailPerm
+            STATMapState -- ":failed + :warning" --> STATFailWarn
+            STATMapState -- "pending/adding_rd" --> STATWaiting
+            STATMapState -- "waiting_*/validating_*" --> STATActive
+        end
+        
+        subgraph STATUS_Format["E. Format Response"]
+            direction LR
+            STATUppercase["UPPERCASE infoHash<br/>(Sonarr case-sensitive)"]
+            STATStringify["Convert numbers to strings<br/>(XML-RPC requirement)"]
+            STATBuildFiles["Build files array"]
+            STATBuildBT["Build bittorrent object"]
+            STATReturn(["Return aria2 status"])
+            
+            STATUppercase --> STATStringify --> STATBuildFiles --> STATBuildBT --> STATReturn
+        end
+        
+        STATUS_Entry --> STATUS_Single
+        STATUS_Entry --> STATUS_List
+        STATUS_Single --> STATUS_Map
+        STATUS_List --> STATUS_Map
+        STATUS_Map --> STATUS_Format
+    end
+    
+    APIQuery ==> STATQueryType
+    STATNotFound ==> APIEncode
+    STATNoCreds ==> APIEncode
+    STATReturn ==> APIEncode
+    
+    %% ============================================================================
+    %% SIDE OPERATIONS (Not part of main FSM flow)
+    %% ============================================================================
+    
+    subgraph Side_Remove["SIDE OPERATION: Manual Remove"]
+        direction TB
+        
+        subgraph SR_Check["A. Check State"]
+            direction LR
+            SR1["aria2.remove/forceRemove<br/>aria2.removeDownloadResult"]
+            SR2{"Torrent exists?"}
+            SR3["Return OK (idempotent)"]
+            SR4{"Torrent state?"}
+            
+            SR1 --> SR2
+            SR2 -- No --> SR3
+            SR2 -- Yes --> SR4
+        end
+        
+        subgraph SR_Cleanup["B. Cleanup Decision"]
+            direction LR
+            SR5[":success<br/>→ Keep RD"]
+            SR6["processing state<br/>→ Keep RD"]
+            SR7[":validation<br/>→ Keep RD"]
+            SR8[":warning<br/>→ Keep RD"]
+            SR9[":permanent<br/>→ Cleanup RD"]
+            
+            SR4 -- ":success" --> SR5
+            SR4 -- "processing" --> SR6
+            SR4 -- ":validation" --> SR7
+            SR4 -- ":warning" --> SR8
+            SR4 -- ":permanent" --> SR9
+        end
+        
+        subgraph SR_Remove["C. Remove from State"]
+            direction LR
+            SR10["Unregister GID"]
+            SR11["Remove from Manager state"]
+            SR12["Return OK"]
+            
+            SR10 --> SR11 --> SR12
+        end
+        
+        SR_Check --> SR_Cleanup --> SR_Remove
+    end
+    
+    APIRemove ==> SR1
+    SR3 ==> APIEncode
+    SR12 ==> APIEncode
+    
+    subgraph Side_Cleanup["SIDE OPERATION: Automatic Cleanup Timer"]
+        direction TB
+        
+        subgraph SC_Timer["A. Periodic Check"]
+            direction LR
+            SC1["Timer: Every 1 minute"]
+            SC2["Scan for :failed torrents"]
+            SC3{"failed_at + 5min < now?"}
+            SC4["Not yet due"]
+            
+            SC1 --> SC2 --> SC3
+            SC3 -- No --> SC4 --> SC1
+        end
+        
+        subgraph SC_Cleanup["B. Cleanup Expired"]
+            direction LR
+            SC5["Manager.cleanup_torrents"]
+            SC6{"failure_type?"}
+            SC7[":permanent<br/>→ Cleanup RD"]
+            SC8[":validation<br/>→ Cleanup RD"]
+            SC9[":warning<br/>→ Keep RD"]
+            
+            SC5 --> SC6
+            SC6 -- ":permanent" --> SC7
+            SC6 -- ":validation" --> SC8
+            SC6 -- ":warning" --> SC9
+        end
+        
+        subgraph SC_Remove["C. Remove from State"]
+            direction LR
+            SC10["Unregister GID"]
+            SC11["Remove from Manager state"]
+            SC12["Continue monitoring"]
+            
+            SC10 --> SC11 --> SC12 --> SC1
+        end
+        
+        SC_Timer --> SC_Cleanup --> SC_Remove
+    end
+    
+    %% ============================================================================
+    %% EXTERNAL SERVICES (Referenced by states)
+    %% ============================================================================
+    
+    subgraph Services["EXTERNAL SERVICES"]
+        direction LR
+        SVC1[["Real-Debrid API"]]
+        SVC2[["Sonarr/Radarr API"]]
+        SVC3[["FFprobe/FFmpeg"]]
+    end
+    
+    %% ============================================================================
+    %% SUPPORT MODULES (Referenced by states)
+    %% ============================================================================
+    
+    subgraph Modules["SUPPORT MODULES"]
+        direction TB
+        
+        subgraph MOD_Parse["Parsing"]
+            MOD1["TorrentParser"]
+            MOD2["FileSelector"]
+        end
+        
+        subgraph MOD_Network["Network & Retry"]
+            MOD3["RDPoller"]
+            MOD4["ServarrSync"]
+            MOD5["RetryPolicy"]
+        end
+        
+        subgraph MOD_Validate["Validation"]
+            MOD6["ValidationPipeline"]
+            MOD7["FileCountValidator"]
+            MOD8["MediaValidator"]
+            MOD9["PathValidator"]
+        end
+        
+        subgraph MOD_Error["Error Handling"]
+            MOD10["FailureHandler"]
+            MOD11["ErrorClassifier"]
+        end
+    end
+    
+    %% ============================================================================
+    %% STYLING
+    %% ============================================================================
+    
+    classDef layerStyle fill:#f5f5f5,stroke:#616161,stroke-width:3px,color:#000
+    classDef stateStyle fill:#fff3e0,stroke:#e65100,stroke-width:3px,color:#000
+    classDef terminalSuccess fill:#e8f5e9,stroke:#2e7d32,stroke-width:3px,color:#000
+    classDef terminalFailed fill:#ffebee,stroke:#c62828,stroke-width:3px,color:#000
+    classDef sideOp fill:#e3f2fd,stroke:#1565c0,stroke-width:2px,color:#000
+    classDef service fill:#fce4ec,stroke:#c2185b,stroke-width:2px,color:#000
+    classDef module fill:#e8eaf6,stroke:#3f51b5,stroke-width:2px,color:#000
+    classDef entryExit fill:#e1f5ff,stroke:#01579b,stroke-width:2px,color:#000
+    classDef errorNode fill:#ffcdd2,stroke:#b71c1c,stroke-width:2px,color:#000
+    
+    class API,PRODUCER,QUEUE,STATUS layerStyle
+    class State_Pending,State_Adding,State_WaitMeta,State_SelectFiles,State_Refresh,State_WaitDL,State_ValidateCount,State_ValidateMedia,State_ValidatePath stateStyle
+    class Terminal_Success terminalSuccess
+    class Terminal_Failed terminalFailed
+    class Side_Remove,Side_Cleanup sideOp
+    class Services,SVC1,SVC2,SVC3 service
+    class Modules,MOD_Parse,MOD_Network,MOD_Validate,MOD_Error,MOD1,MOD2,MOD3,MOD4,MOD5,MOD6,MOD7,MOD8,MOD9,MOD10,MOD11 module
+    class APIStart,APISend,ProdSuccess,ProdReject,End_Success,End_Failed,STATNotFound,STATNoCreds,STATReturn entryExit
+    class Fail_Parse,Fail_Magnet,Fail_RDError,Fail_Dead,Fail_NoCreds,Fail_ServarrAPI,Fail_EmptyHistory,Fail_NotDL,Fail_CountMismatch,Fail_MediaInvalid errorNode
+
+%% ============================================================================
+%% LEGEND & DOCUMENTATION
+%% ============================================================================
+%% 
+%% SYSTEM LAYERS:
+%%   1. API Layer - XML-RPC request handling and routing
+%%   2. Producer Layer - Fast GID generation, duplicate checking
+%%   3. Queue Consumer - FSM state machine (detailed below)
+%%   4. Status Reporting - Query responses with multi-tenant filtering
+%%   5. Side Operations - Manual remove, automatic cleanup timer
+%%
+%% STATE MACHINE FLOW (Main Path):
+%%   pending → adding_rd → waiting_metadata → selecting_files → refreshing_info
+%%   → waiting_download → validating_file_count → validating_media 
+%%   → validating_path → success
+%% 
+%% FAILURE PATHS:
+%%   Any state can transition to :failed with appropriate failure_type:
+%%   • :application - Raise exception (system/config issue requiring admin intervention)
+%%   • :permanent - Cleanup RD immediately (non-retryable error)
+%%   • :validation - Keep RD, notify Servarr with code 24, trigger re-search
+%%   • :warning - Keep RD, no notification (transient issue, may recover)
+%% 
+%% SIDE OPERATIONS:
+%%   • Manual Remove - aria2.remove/forceRemove/removeDownloadResult
+%%   • Automatic Cleanup - Timer-based cleanup after retention period (5 min)
+%% 
+%% KEY DESIGN DECISIONS:
+%%   ✓ Error classification at source (not in terminal state)
+%%   ✓ Config module explicitly shown with Config.get() calls
+%%   ✓ Config-gated validation phases (can be disabled individually)
+%%   ✓ ALWAYS wait for download completion (require_downloaded controls fail/retry)
+%%   ✓ File count validation moved INTO validating_file_count state
+%%   ✓ Path validation simplified: retry every 5s indefinitely (no max retries)
+%%   ✓ Servarr API errors are :application failures (raise exception)
+%%   ✓ Empty history list from Servarr is :validation failure (code 24)
+%%   ✓ History API retry on "not found yet" (different from "empty list")
+%%   ✓ Explicit failure types drive cleanup strategy
+%%   ✓ Retry logic inline within states
+%%   ✓ Single responsibility per state
+%%   ✓ Multi-tenant filtering via Servarr grabbed history
+%%   ✓ Case-sensitive infohash handling (UPPERCASE for Sonarr)
+%%   ✓ XML-RPC numeric fields as strings (not integers)
+%% 
+%% EXTERNAL DEPENDENCIES:
+%%   • Real-Debrid API - Torrent management, file selection, streaming
+%%   • Sonarr/Radarr API - Expected file count from history, failure notifications
+%%   • FFprobe/FFmpeg - Media validation
+%%   • Config Module - Runtime configuration queries
+%% 
+%% SUPPORT MODULES:
+%%   • TorrentParser - Extract infohash from magnet/torrent
+%%   • FileSelector - Filter video/subtitle/metadata files
+%%   • RDPoller - Unified Real-Debrid polling strategies
+%%   • ServarrSync - Servarr API interactions (history, refresh, notify)
+%%   • RetryPolicy - Exponential backoff for network operations
+%%   • ValidationPipeline - Orchestrate validation phases
+%%   • FileCountValidator - Compare actual vs expected file counts
+%%   • MediaValidator - FFprobe-based media validation
+%%   • PathValidator - Verify rclone mount paths
+%%   • FailureHandler - Wrap operations with error classification
+%%   • ErrorClassifier - Categorize errors into failure types
+%% 
+%% CONFIG VALUES REFERENCED:
+%%   • :require_downloaded (State ⑥) - Whether to fail or retry on non-downloaded status
+%%   • :file_count_validation (State ⑦) - Enable/disable file count validation
+%%   • :media_validation (State ⑧) - Enable/disable FFprobe validation
+%%   • :validate_paths (State ⑨) - Enable/disable rclone path validation
+%% 
+%% ARROW LEGEND:
+%%   ==> Thick solid arrows - Cross-layer boundaries (API → Producer → Queue → Status)
+%%   --> Normal solid arrows - Flow within same layer
+%%   -.-> Dotted arrows - Module/Service calls
+%% 
+%% ============================================================================
