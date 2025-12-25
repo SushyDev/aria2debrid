@@ -577,7 +577,7 @@ flowchart TB
             STATCheckCreds{"Has Servarr<br/>credentials?"}
             STATNoCreds(["Return Error:<br/>Missing credentials"])
             STATFetchGrabbed["Fetch Servarr grabbed history<br/>(ServarrSync)"]
-            STATGetAll["Get all torrents<br/>from Manager"]
+            STATGetAll["Get torrents by endpoint:<br/>• tellActive: @active_states<br/>  + warning failures<br/>• tellWaiting: @waiting_states<br/>• tellStopped: success/failed<br/>  (excl. warning)"]
             STATFilter["Filter: infohash in<br/>grabbed_ids"]
             STATIterate["Iterate filtered torrents"]
             
@@ -593,15 +593,15 @@ flowchart TB
             STATFailVal["status: error<br/>errorCode: 24<br/>(:validation)"]
             STATFailPerm["status: error<br/>errorCode: 1<br/>(:permanent)"]
             STATFailWarn["status: active<br/>completedLength: 0<br/>(:warning - appears stalled)"]
-            STATWaiting["status: waiting<br/>completedLength: 0<br/>(pending/adding_rd)"]
-            STATActive["status: active<br/>completedLength from RD<br/>(waiting_*/validating_*)"]
+            STATWaiting["status: waiting<br/>completedLength: 0<br/>(pending/adding_rd/<br/>waiting_metadata/<br/>selecting_files/<br/>refreshing_info/<br/>fetching_queue)"]
+            STATActive["status: active<br/>completedLength from RD<br/>(waiting_download/<br/>validating_*)"]
             
             STATMapState -- ":success" --> STATSuccess
             STATMapState -- ":failed + :validation" --> STATFailVal
             STATMapState -- ":failed + :permanent" --> STATFailPerm
             STATMapState -- ":failed + :warning" --> STATFailWarn
-            STATMapState -- "pending/adding_rd" --> STATWaiting
-            STATMapState -- "waiting_*/validating_*" --> STATActive
+            STATMapState -- "@waiting_states" --> STATWaiting
+            STATMapState -- "@active_states" --> STATActive
         end
         
         subgraph STATUS_Format["E. Format Response"]
@@ -826,6 +826,10 @@ flowchart TB
 %%   ✓ Multi-tenant filtering via Servarr grabbed history
 %%   ✓ Case-sensitive infohash handling (UPPERCASE for Sonarr)
 %%   ✓ XML-RPC numeric fields as strings (not integers)
+%%   ✓ Endpoint filtering prevents duplicates:
+%%     - tellActive: @active_states + warning failures
+%%     - tellWaiting: @waiting_states
+%%     - tellStopped: success + failed (excl. warning)
 %% 
 %% EXTERNAL DEPENDENCIES:
 %%   • Real-Debrid API - Torrent management, file selection, streaming
