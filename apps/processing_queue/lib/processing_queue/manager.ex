@@ -19,14 +19,17 @@ defmodule ProcessingQueue.Manager do
     GenServer.start_link(__MODULE__, opts, name: __MODULE__)
   end
 
+  # Timeout for operations that may involve Real-Debrid API calls
+  @call_timeout 60_000
+
   @spec add_magnet(String.t(), keyword()) :: {:ok, String.t()} | {:error, term()}
   def add_magnet(magnet, opts \\ []) do
-    GenServer.call(__MODULE__, {:add_magnet, magnet, opts})
+    GenServer.call(__MODULE__, {:add_magnet, magnet, opts}, @call_timeout)
   end
 
   @spec add_torrent_file(binary(), keyword()) :: {:ok, String.t()} | {:error, term()}
   def add_torrent_file(torrent_data, opts \\ []) when is_binary(torrent_data) do
-    GenServer.call(__MODULE__, {:add_torrent_file, torrent_data, opts})
+    GenServer.call(__MODULE__, {:add_torrent_file, torrent_data, opts}, @call_timeout)
   end
 
   @spec get_torrent(String.t()) :: {:ok, Torrent.t()} | {:error, :not_found}
@@ -41,7 +44,7 @@ defmodule ProcessingQueue.Manager do
 
   @spec remove_torrent(String.t()) :: :ok | {:error, term()}
   def remove_torrent(hash) do
-    GenServer.call(__MODULE__, {:remove_torrent, String.downcase(hash)})
+    GenServer.call(__MODULE__, {:remove_torrent, String.downcase(hash)}, @call_timeout)
   end
 
   @spec pause_torrent(String.t()) :: :ok | {:error, term()}
