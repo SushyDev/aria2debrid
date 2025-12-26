@@ -39,7 +39,7 @@ defmodule ProcessingQueue.Manager do
 
   @spec list_torrents() :: [Torrent.t()]
   def list_torrents do
-    GenServer.call(__MODULE__, :list_torrents)
+    GenServer.call(__MODULE__, :list_torrents, @call_timeout)
   end
 
   @spec remove_torrent(String.t()) :: :ok | {:error, term()}
