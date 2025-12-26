@@ -42,7 +42,7 @@ defmodule ProcessingQueue.RDClientManager do
   """
   @spec get_client() :: RealDebrid.Client.t() | nil
   def get_client do
-    GenServer.call(@name, :get_client)
+    GenServer.call(@name, :get_client, 10_000)
   end
 
   # Server Callbacks

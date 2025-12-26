@@ -132,7 +132,7 @@ defmodule ProcessingQueue.Cleanup do
           if Torrent.should_cleanup?(torrent), do: torrent.hash, else: nil
         end,
         max_concurrency: System.schedulers_online() * 2,
-        timeout: 5_000,
+        timeout: 30_000,
         on_timeout: :kill_task,
         ordered: false
       )

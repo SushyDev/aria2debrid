@@ -110,7 +110,7 @@ defmodule ProcessingQueue.Validators.MediaValidator do
     |> Task.async_stream(
       fn file -> validate_single_file(file, rd_id, torrent) end,
       max_concurrency: System.schedulers_online() * 2,
-      timeout: 30_000,
+      timeout: 120_000,
       on_timeout: :kill_task
     )
     |> Enum.reduce_while(:ok, fn
