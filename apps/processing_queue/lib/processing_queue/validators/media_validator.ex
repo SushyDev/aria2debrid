@@ -36,7 +36,7 @@ defmodule ProcessingQueue.Validators.MediaValidator do
 
   require Logger
 
-  alias ProcessingQueue.{FileSelector, RDPoller, Torrent}
+  alias ProcessingQueue.{FileSelector, RDPoller, RetryPolicy, Torrent}
 
   @doc """
   Validates media files for a torrent.
@@ -155,12 +155,13 @@ defmodule ProcessingQueue.Validators.MediaValidator do
     filename = get_filename(file)
     hash = torrent.hash
 
-    # Get the streaming link from Real-Debrid
-    case get_streaming_link(file, rd_id, torrent) do
+    # Get the streaming link from Real-Debrid with retry
+    case get_streaming_link_with_retry(file, rd_id, torrent) do
       {:ok, url, _filename} ->
         Logger.debug("[#{hash}] Got streaming URL for #{filename}")
 
-        case MediaValidator.validate_url(url, enabled: true, filename: filename) do
+        # Validate with retry (FFprobe can fail on network issues)
+        case validate_url_with_retry(url, filename, hash) do
           :ok ->
             Logger.debug("[#{hash}] Media validation passed: #{filename}")
             :ok
@@ -180,6 +181,36 @@ defmodule ProcessingQueue.Validators.MediaValidator do
 
         {:error, {:streaming_link_failed, filename, reason}}
     end
+  end
+
+  defp validate_url_with_retry(url, filename, hash) do
+    RetryPolicy.with_retries(
+      fn -> MediaValidator.validate_url(url, enabled: true, filename: filename) end,
+      max_retries: 3,
+      base_delay: 1_000,
+      max_delay: 5_000,
+      on_retry: fn attempt ->
+        Logger.info(
+          "[#{hash}] Retrying FFprobe validation for #{filename} (attempt #{attempt}/3)"
+        )
+      end
+    )
+  end
+
+  defp get_streaming_link_with_retry(file, rd_id, torrent) do
+    RetryPolicy.with_retries(
+      fn -> get_streaming_link(file, rd_id, torrent) end,
+      max_retries: 3,
+      base_delay: 1_000,
+      max_delay: 5_000,
+      on_retry: fn attempt ->
+        filename = get_filename(file)
+
+        Logger.info(
+          "[#{torrent.hash}] Retrying RD unrestrict link for #{filename} (attempt #{attempt}/3)"
+        )
+      end
+    )
   end
 
   defp get_streaming_link(file, rd_id, torrent) do

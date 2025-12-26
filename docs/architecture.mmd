@@ -435,31 +435,30 @@ flowchart TB
             S8C1 -- Yes --> S8C3
         end
         
-        subgraph S8_Validate["B. FFprobe Each File"]
+        subgraph S8_Validate["B. FFprobe Each File (Concurrent)"]
             direction LR
             S8V1["Get selected video files"]
-            S8V2["For each file:"]
-            S8V3["• Size >= min_size_bytes?"]
-            S8V4["• Filename not 'sample'?"]
-            S8V5["• Get RD streaming link"]
-            S8V6["• FFprobe.probe(stream_url)"]
-            S8V7["• Has video stream?"]
-            S8V8["• Has audio stream?"]
-            S8V9["• Duration >= 10min?"]
-            S8V10{"All files valid?"}
-            S8V11["Media validation passed"]
+            S8V2["Task.async_stream (2x CPUs):"]
+            S8V3["• Filename not 'sample'?"]
+            S8V4["• Get RD streaming link<br/>  (retry 3x, 1-5s backoff)"]
+            S8V5["• FFprobe.probe(stream_url)<br/>  (retry 3x, 1-5s backoff)"]
+            S8V6["• Has video stream?"]
+            S8V7["• Has audio stream?"]
+            S8V8["• Duration >= 10min?"]
+            S8V9{"All files valid?"}
+            S8V10["Media validation passed"]
             
-            S8V1 --> S8V2 --> S8V3 --> S8V4 --> S8V5 --> S8V6
-            S8V6 --> S8V7 --> S8V8 --> S8V9 --> S8V10
-            S8V10 -- Yes --> S8V11
+            S8V1 --> S8V2 --> S8V3 --> S8V4 --> S8V5
+            S8V5 --> S8V6 --> S8V7 --> S8V8 --> S8V9
+            S8V9 -- Yes --> S8V10
         end
         
         S8_Config --> S8_Validate
     end
     
     S8C2 --> State_ValidatePath
-    S8V10 -- No --> Fail_MediaInvalid["failure_type: :validation<br/>Notify Servarr (code 24)<br/>'Media validation failed'"] --> Terminal_Failed
-    S8V11 --> State_ValidatePath
+    S8V9 -- No --> Fail_MediaInvalid["failure_type: :validation<br/>Notify Servarr (code 24)<br/>'Media validation failed'"] --> Terminal_Failed
+    S8V10 --> State_ValidatePath
     
     %% ============================================================================
     %% STATE: VALIDATING_PATH
@@ -698,9 +697,9 @@ flowchart TB
             SC3 -- No --> SC4 --> SC1
         end
         
-        subgraph SC_Cleanup["B. Cleanup Expired"]
+        subgraph SC_Cleanup["B. Cleanup Expired (Concurrent)"]
             direction LR
-            SC5["Manager.cleanup_torrents"]
+            SC5["Manager.cleanup_torrents<br/>(Task.async_stream, 2x CPUs)"]
             SC6{"failure_type?"}
             SC7[":permanent<br/>→ Cleanup RD"]
             SC8[":validation<br/>→ Cleanup RD"]
@@ -841,6 +840,12 @@ flowchart TB
 %%     - Prevents "Downloaded - Waiting to Import" status (not 100%)
 %%     - Prevents being hidden from Activity view (not 0%)
 %%     - Sonarr shows "Downloading" with minimal progress until validation complete
+%%   ✓ Concurrent batch operations for performance:
+%%     - Media validation: Task.async_stream (2x CPUs, 30s timeout per file)
+%%     - Cleanup operations: Task.async_stream (2x CPUs, 5s timeout per check)
+%%   ✓ Retry logic for transient failures:
+%%     - FFprobe validation: 3 attempts, 1-5s exponential backoff
+%%     - RD unrestrict_link: 3 attempts, 1-5s exponential backoff
 %% 
 %% EXTERNAL DEPENDENCIES:
 %%   • Real-Debrid API - Torrent management, file selection, streaming
