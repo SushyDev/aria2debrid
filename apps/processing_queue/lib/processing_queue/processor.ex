@@ -540,14 +540,7 @@ defmodule ProcessingQueue.Processor do
   defp missing_servarr_api_key?(_), do: false
 
   defp get_rd_client do
-    token = Aria2Debrid.Config.real_debrid_token()
-    max_requests = Aria2Debrid.Config.requests_per_minute()
-    max_retries = Aria2Debrid.Config.max_retries()
-
-    RealDebrid.Client.new(token,
-      max_requests_per_minute: max_requests,
-      max_retries: max_retries
-    )
+    ProcessingQueue.RDClientManager.get_client()
   end
 
   # ============================================================================

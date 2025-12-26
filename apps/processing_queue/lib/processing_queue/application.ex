@@ -8,6 +8,7 @@ defmodule ProcessingQueue.Application do
     children = [
       {Registry, keys: :unique, name: ProcessingQueue.TorrentRegistry},
       {DynamicSupervisor, strategy: :one_for_one, name: ProcessingQueue.TorrentSupervisor},
+      ProcessingQueue.RDClientManager,
       ProcessingQueue.Manager,
       ProcessingQueue.Cleanup
     ]
