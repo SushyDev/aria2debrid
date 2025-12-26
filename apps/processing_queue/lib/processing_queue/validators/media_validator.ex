@@ -268,13 +268,6 @@ defmodule ProcessingQueue.Validators.MediaValidator do
 
   defp find_link_for_file(_, _, _), do: {:error, :no_links_available}
 
-  defp get_filename_by_id(files, file_id) when is_list(files) do
-    file = Enum.find(files, fn f -> get_file_id(f) == file_id end)
-    if file, do: get_filename(file), else: nil
-  end
-
-  defp get_filename_by_id(_, _), do: nil
-
   defp check_not_sample_by_name(filename) do
     if MediaValidator.is_sample_by_name?(filename) do
       {:error, {:sample_file, filename}}

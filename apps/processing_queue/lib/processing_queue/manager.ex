@@ -111,31 +111,6 @@ defmodule ProcessingQueue.Manager do
     end
   end
 
-  defp add_new_torrent(magnet, hash, opts, state) do
-    torrent = Torrent.new(hash, magnet)
-    torrent = apply_opts(torrent, opts)
-
-    Logger.debug("Adding torrent #{hash} to Real Debrid")
-    client = get_rd_client()
-
-    case RealDebrid.Api.AddMagnet.add(client, magnet) do
-      {:ok, response} ->
-        rd_id = response.id
-        torrent = %{torrent | rd_id: rd_id}
-        torrent = Torrent.transition(torrent, :waiting_metadata)
-
-        start_processor(torrent)
-
-        new_state = put_in(state.torrents[hash], torrent)
-        Logger.info("Added torrent #{hash} to processing queue with RD ID #{rd_id}")
-        {:reply, {:ok, hash}, new_state}
-
-      {:error, reason} ->
-        Logger.error("Failed to add torrent #{hash} to Real Debrid: #{inspect(reason)}")
-        {:reply, {:error, reason}, state}
-    end
-  end
-
   @impl true
   def handle_call({:add_torrent_file, torrent_data, opts}, _from, state) do
     case ProcessingQueue.TorrentParser.extract_infohash(torrent_data) do
@@ -173,33 +148,6 @@ defmodule ProcessingQueue.Manager do
 
       {:error, reason} ->
         Logger.error("Failed to extract infohash from torrent file: #{inspect(reason)}")
-        {:reply, {:error, reason}, state}
-    end
-  end
-
-  defp add_new_torrent_file(torrent_data, hash, opts, state) do
-    magnet = "magnet:?xt=urn:btih:#{hash}"
-    torrent = Torrent.new(hash, magnet)
-    torrent = apply_opts(torrent, opts)
-
-    Logger.debug("Adding torrent file #{hash} to Real Debrid")
-    client = get_rd_client()
-
-    case RealDebrid.Api.AddTorrent.add(client, torrent_data) do
-      {:ok, response} ->
-        rd_id = response.id
-        torrent = %{torrent | rd_id: rd_id}
-        torrent = Torrent.transition(torrent, :waiting_metadata)
-
-        start_processor(torrent)
-
-        new_state = put_in(state.torrents[hash], torrent)
-        Logger.info("Added torrent file #{hash} to processing queue with RD ID #{rd_id}")
-        {:reply, {:ok, hash}, new_state}
-
-      {:error, reason} ->
-        Logger.error("Failed to add torrent file #{hash} to Real Debrid: #{inspect(reason)}")
-
         {:reply, {:error, reason}, state}
     end
   end
@@ -333,6 +281,58 @@ defmodule ProcessingQueue.Manager do
   end
 
   # Private functions
+
+  defp add_new_torrent(magnet, hash, opts, state) do
+    torrent = Torrent.new(hash, magnet)
+    torrent = apply_opts(torrent, opts)
+
+    Logger.debug("Adding torrent #{hash} to Real Debrid")
+    client = get_rd_client()
+
+    case RealDebrid.Api.AddMagnet.add(client, magnet) do
+      {:ok, response} ->
+        rd_id = response.id
+        torrent = %{torrent | rd_id: rd_id}
+        torrent = Torrent.transition(torrent, :waiting_metadata)
+
+        start_processor(torrent)
+
+        new_state = put_in(state.torrents[hash], torrent)
+        Logger.info("Added torrent #{hash} to processing queue with RD ID #{rd_id}")
+        {:reply, {:ok, hash}, new_state}
+
+      {:error, reason} ->
+        Logger.error("Failed to add torrent #{hash} to Real Debrid: #{inspect(reason)}")
+        {:reply, {:error, reason}, state}
+    end
+  end
+
+  defp add_new_torrent_file(torrent_data, hash, opts, state) do
+    magnet = "magnet:?xt=urn:btih:#{hash}"
+    torrent = Torrent.new(hash, magnet)
+    torrent = apply_opts(torrent, opts)
+
+    Logger.debug("Adding torrent file #{hash} to Real Debrid")
+    client = get_rd_client()
+
+    case RealDebrid.Api.AddTorrent.add(client, torrent_data) do
+      {:ok, response} ->
+        rd_id = response.id
+        torrent = %{torrent | rd_id: rd_id}
+        torrent = Torrent.transition(torrent, :waiting_metadata)
+
+        start_processor(torrent)
+
+        new_state = put_in(state.torrents[hash], torrent)
+        Logger.info("Added torrent file #{hash} to processing queue with RD ID #{rd_id}")
+        {:reply, {:ok, hash}, new_state}
+
+      {:error, reason} ->
+        Logger.error("Failed to add torrent file #{hash} to Real Debrid: #{inspect(reason)}")
+
+        {:reply, {:error, reason}, state}
+    end
+  end
 
   defp extract_hash(magnet) do
     case Regex.run(~r/btih:([a-fA-F0-9]{40})/i, magnet) do
