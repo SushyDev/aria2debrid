@@ -65,5 +65,11 @@ if config_env() in [:dev, :prod] do
     notify_on_failure: System.get_env("NOTIFY_SERVARR_ON_FAILURE") == "true",
     blocklist_on_failure: System.get_env("BLOCKLIST_ON_FAILURE") == "true",
     search_on_failure: System.get_env("SEARCH_ON_FAILURE") == "true",
-    history_lookback_days: String.to_integer(System.get_env("SERVARR_HISTORY_DAYS") || "7")
+    history_lookback_days: case(Integer.parse(System.get_env("SERVARR_HISTORY_DAYS") || "7")) do
+    {days, _} when days > 0 ->
+      days
+
+    _ ->
+      raise "SERVARR_HISTORY_DAYS must be a positive integer, got: #{System.get_env("SERVARR_HISTORY_DAYS")}"
+  end
 end

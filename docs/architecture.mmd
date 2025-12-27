@@ -438,7 +438,7 @@ flowchart TB
         subgraph S8_Validate["B. FFprobe Each File (Concurrent)"]
             direction LR
             S8V1["Get selected video files"]
-            S8V2["Task.async_stream (max 8):"]
+            S8V2["Task.async_stream (max 8 concurrent files):"]
             S8V3["• Filename not 'sample'?"]
             S8V4["• Get RD streaming link<br/>  (retry 3x, 1-5s backoff)"]
             S8V5["• FFprobe.probe(stream_url)<br/>  (retry 3x, 1-5s backoff)"]
@@ -448,9 +448,9 @@ flowchart TB
             S8V9{"All files valid?"}
             S8V10["Media validation passed"]
             
-            S8V1 --> S8V2 --> S8V3 --> S8V4 --> S8V5
-            S8V5 --> S8V6 --> S8V7 --> S8V8 --> S8V9
-            S8V9 -- Yes --> S8V10
+            S8V1 --> S8V2 --> S8V3 --> S8V4 --> S8V5 --> S8V6
+            S8V6 --> S8V7 --> S8V8 --> S8V9 --> S8V10
+            S8V10 -- Yes --> S8V11
         end
         
         S8_Config --> S8_Validate
@@ -842,7 +842,7 @@ flowchart TB
 %%     - Prevents being hidden from Activity view (not 0%)
 %%     - Sonarr shows "Downloading" with minimal progress until validation complete
 %%   ✓ Concurrent batch operations for performance:
-%%     - Media validation: Task.async_stream (max 8 concurrent, 120s timeout per file)
+%%     - Media validation: Task.async_stream (max 8 concurrent files, 120s timeout per file)
 %%     - Cleanup operations: Task.async_stream (2x CPUs, 30s timeout per check)
 %%   ✓ Retry logic for transient failures:
 %%     - FFprobe validation: 3 attempts, 1-5s exponential backoff
