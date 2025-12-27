@@ -438,7 +438,7 @@ flowchart TB
         subgraph S8_Validate["B. FFprobe Each File (Concurrent)"]
             direction LR
             S8V1["Get selected video files"]
-            S8V2["Task.async_stream (2x CPUs):"]
+            S8V2["Task.async_stream (max 8):"]
             S8V3["• Filename not 'sample'?"]
             S8V4["• Get RD streaming link<br/>  (retry 3x, 1-5s backoff)"]
             S8V5["• FFprobe.probe(stream_url)<br/>  (retry 3x, 1-5s backoff)"]
@@ -750,6 +750,7 @@ flowchart TB
             MOD3["RDPoller"]
             MOD4["ServarrSync"]
             MOD5["RetryPolicy"]
+            MOD12["RDClientManager"]
         end
         
         subgraph MOD_Validate["Validation"]
@@ -785,7 +786,7 @@ flowchart TB
     class Terminal_Failed terminalFailed
     class Side_Remove,Side_Cleanup sideOp
     class Services,SVC1,SVC2,SVC3 service
-    class Modules,MOD_Parse,MOD_Network,MOD_Validate,MOD_Error,MOD1,MOD2,MOD3,MOD4,MOD5,MOD6,MOD7,MOD8,MOD9,MOD10,MOD11 module
+    class Modules,MOD_Parse,MOD_Network,MOD_Validate,MOD_Error,MOD1,MOD2,MOD3,MOD4,MOD5,MOD6,MOD7,MOD8,MOD9,MOD10,MOD11,MOD12 module
     class APIStart,APISend,ProdSuccess,ProdReject,End_Success,End_Failed,STATNotFound,STATNoCreds,STATReturn entryExit
     class Fail_Parse,Fail_Magnet,Fail_RDError,Fail_Dead,Fail_NoCreds,Fail_ServarrAPI,Fail_EmptyHistory,Fail_NotDL,Fail_CountMismatch,Fail_MediaInvalid errorNode
 
@@ -841,11 +842,15 @@ flowchart TB
 %%     - Prevents being hidden from Activity view (not 0%)
 %%     - Sonarr shows "Downloading" with minimal progress until validation complete
 %%   ✓ Concurrent batch operations for performance:
-%%     - Media validation: Task.async_stream (2x CPUs, 30s timeout per file)
-%%     - Cleanup operations: Task.async_stream (2x CPUs, 5s timeout per check)
+%%     - Media validation: Task.async_stream (max 8 concurrent, 120s timeout per file)
+%%     - Cleanup operations: Task.async_stream (2x CPUs, 30s timeout per check)
 %%   ✓ Retry logic for transient failures:
 %%     - FFprobe validation: 3 attempts, 1-5s exponential backoff
 %%     - RD unrestrict_link: 3 attempts, 1-5s exponential backoff
+%%   ✓ Shared RealDebrid client via RDClientManager:
+%%     - Single client reused across application (avoids rate limiter GenServer leaks)
+%%     - Automatically recreates client if token changes
+%%     - Rate limiter is per-token, so sharing is recommended approach
 %% 
 %% EXTERNAL DEPENDENCIES:
 %%   • Real-Debrid API - Torrent management, file selection, streaming
@@ -857,6 +862,7 @@ flowchart TB
 %%   • TorrentParser - Extract infohash from magnet/torrent
 %%   • FileSelector - Filter video/subtitle/metadata files
 %%   • RDPoller - Unified Real-Debrid polling strategies
+%%   • RDClientManager - Manages shared RealDebrid client (prevents resource leaks)
 %%   • ServarrSync - Servarr API interactions (history, refresh, notify)
 %%   • RetryPolicy - Exponential backoff for network operations
 %%   • ValidationPipeline - Orchestrate validation phases
