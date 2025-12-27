@@ -106,11 +106,21 @@ defmodule ServarrClient do
   Fetches grabbed download IDs for multi-tenant filtering.
 
   Returns a MapSet of infohashes from the Servarr's grabbed history.
-  Uses `/api/v3/history/since?eventType=grabbed` which works for both Sonarr and Radarr.
+  Uses `/api/v3/history/since?eventType=grabbed&date=<date>` which works for both Sonarr and Radarr.
+
+  The `/api/v3/history/since` endpoint returns ALL matching records without pagination,
+  ensuring we never miss torrents within the time window.
+
+  ## Options
+    - `:days` - Number of days of history to fetch (default: from application config or 7)
   """
   @spec get_grabbed_download_ids(client(), keyword()) :: {:ok, MapSet.t(String.t())} | error()
-  def get_grabbed_download_ids(client, _opts \\ []) do
-    case request(client, "/api/v3/history/since", %{eventType: "grabbed"}) do
+  def get_grabbed_download_ids(client, opts \\ []) do
+    default_days = Application.get_env(:servarr_client, :history_lookback_days, 7)
+    days = Keyword.get(opts, :days, default_days)
+    since_date = DateTime.utc_now() |> DateTime.add(-days, :day) |> DateTime.to_iso8601()
+
+    case request(client, "/api/v3/history/since", %{eventType: "grabbed", date: since_date}) do
       {:ok, records} when is_list(records) ->
         download_ids =
           records

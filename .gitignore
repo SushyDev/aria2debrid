@@ -65,6 +65,10 @@ debug_servarr.exs
 *.md
 !AGENTS.md
 
+# Integration tests (not part of test suite)
+/scripts/
+/integration_logs/
+
 # Symlinks to other projects
 debrid_drive
 qdebrid

@@ -18,12 +18,12 @@ defmodule ProcessingQueue.Validators.MediaValidator do
   ## Concurrency
 
   Files are validated concurrently using `Task.async_stream/3` with:
-  - Max concurrency: 2x the number of CPU cores
-  - Timeout: 30 seconds per file
+  - Max concurrency: capped at 8 concurrent files (avoids RD CDN rate limiting)
+  - Timeout: 120 seconds per file (handles network delays + FFprobe processing)
   - Failed tasks are killed on timeout
 
-  This provides 3-5x faster validation for multi-file torrents while
-  respecting system resources.
+  This provides fast validation for multi-file torrents while avoiding
+  Real-Debrid CDN rate limiting and connection timeouts.
 
   ## Usage
 
@@ -109,8 +109,8 @@ defmodule ProcessingQueue.Validators.MediaValidator do
     video_files
     |> Task.async_stream(
       fn file -> validate_single_file(file, rd_id, torrent) end,
-      max_concurrency: System.schedulers_online() * 2,
-      timeout: 30_000,
+      max_concurrency: min(8, System.schedulers_online()),
+      timeout: 120_000,
       on_timeout: :kill_task
     )
     |> Enum.reduce_while(:ok, fn
