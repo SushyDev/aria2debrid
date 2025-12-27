@@ -99,7 +99,7 @@ The SecretToken is parsed directly as `url|api_key` format. The pipe character `
 - When Sonarr/Radarr makes a request:
   1. aria2debrid extracts the secret token from the request
   2. Parses it as `url|api_key` to get Servarr credentials
-  3. Fetches that Servarr's grabbed history via `/api/v3/history?eventType=grabbed`
+  3. Fetches that Servarr's grabbed history via `/api/v3/history/since?eventType=grabbed&date=<date>` (last 7 days)
   4. Filters torrents to only show those whose infohash appears in that Servarr's grabbed history
   5. Returns filtered list (each Servarr only sees downloads it grabbed)
 
@@ -116,7 +116,8 @@ The SecretToken is parsed directly as `url|api_key` format. The pipe character `
 - Prevents Sonarr from seeing Radarr's downloads and vice versa (via infohash filtering)
 - Handles complex networking (internal/external, docker, proxies, etc.)
 - **REQUIRED**: SecretToken must be configured, otherwise returns empty list (no downloads visible)
-- Uses `/api/v3/history/since?eventType=grabbed` endpoint (simple, no pagination needed)
+- Uses `/api/v3/history/since?eventType=grabbed&date=<date>` endpoint with 7-day lookback window (configurable)
+- The endpoint returns ALL matching records without pagination, ensuring complete history within the time window
 
 ### 5. Credential Cache for Health Checks
 **Critical Decision** (see `apps/aria2_api/lib/aria2_api/credential_cache.ex`):

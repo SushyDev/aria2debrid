@@ -29,8 +29,8 @@ config :processing_queue,
     # "tbn"
   ],
   # Automatic cleanup of failed downloads
-  failed_retention: :timer.seconds(90),
-  cleanup_interval: :timer.seconds(90),
+  failed_retention: :timer.seconds(600),
+  cleanup_interval: :timer.seconds(600),
   queue_fetch_retries: 5,
   metadata_timeout: :timer.minutes(2),
   path_validation_retries: 1000,

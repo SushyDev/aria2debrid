@@ -266,12 +266,12 @@ defmodule ProcessingQueue.RDPoller do
 
   @doc """
   Convenience function to get RealDebrid client from config.
+
+  Uses the shared RDClientManager to avoid creating multiple clients
+  and causing resource leaks (each client spawns its own rate limiter).
   """
   @spec get_client() :: RealDebrid.Client.t() | nil
   def get_client do
-    case Aria2Debrid.Config.real_debrid_token() do
-      nil -> nil
-      token -> RealDebrid.Client.new(token)
-    end
+    ProcessingQueue.RDClientManager.get_client()
   end
 end

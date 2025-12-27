@@ -1,19 +1,29 @@
 defmodule ProcessingQueue.Validators.MediaValidator do
   @moduledoc """
-  Validates media files using FFprobe.
+  Validates media files using FFprobe with concurrent processing.
 
   Wraps the `MediaValidator` app to provide a consistent interface
   for the validation pipeline. Validates each selected video file
-  via Real-Debrid streaming URLs.
+  via Real-Debrid streaming URLs using `Task.async_stream/3` for
+  concurrent validation of multiple files.
 
   ## Validation Checks
 
   For each video file:
-  - File size >= minimum (default 500MB)
   - Filename doesn't contain "sample"
   - Has video stream (if required)
   - Has audio stream (if required)
-  - Duration >= minimum (default 5 minutes, to filter samples)
+  - Duration >= minimum (default 10 minutes, to filter samples)
+
+  ## Concurrency
+
+  Files are validated concurrently using `Task.async_stream/3` with:
+  - Max concurrency: capped at 8 concurrent files (avoids RD CDN rate limiting)
+  - Timeout: 120 seconds per file (handles network delays + FFprobe processing)
+  - Failed tasks are killed on timeout
+
+  This provides fast validation for multi-file torrents while avoiding
+  Real-Debrid CDN rate limiting and connection timeouts.
 
   ## Usage
 
@@ -26,7 +36,7 @@ defmodule ProcessingQueue.Validators.MediaValidator do
 
   require Logger
 
-  alias ProcessingQueue.{FileSelector, RDPoller, Torrent}
+  alias ProcessingQueue.{FileSelector, RDPoller, RetryPolicy, Torrent}
 
   @doc """
   Validates media files for a torrent.
@@ -92,19 +102,35 @@ defmodule ProcessingQueue.Validators.MediaValidator do
   end
 
   defp validate_files(video_files, rd_id, torrent) do
-    results =
-      video_files
-      |> Enum.map(fn file ->
-        validate_single_file(file, rd_id, torrent)
-      end)
+    Logger.debug(
+      "[#{torrent.hash}] Starting concurrent validation of #{length(video_files)} files"
+    )
 
-    case Enum.find(results, fn result -> match?({:error, _}, result) end) do
-      nil ->
+    video_files
+    |> Task.async_stream(
+      fn file -> validate_single_file(file, rd_id, torrent) end,
+      max_concurrency: min(8, System.schedulers_online()),
+      timeout: 120_000,
+      on_timeout: :kill_task
+    )
+    |> Enum.reduce_while(:ok, fn
+      {:ok, :ok}, :ok ->
+        {:cont, :ok}
+
+      {:ok, {:error, reason}}, _ ->
+        {:halt, {:error, reason}}
+
+      {:exit, reason}, _ ->
+        Logger.error("[#{torrent.hash}] Validation task crashed: #{inspect(reason)}")
+        {:halt, {:error, {:validation_timeout, reason}}}
+    end)
+    |> case do
+      :ok ->
         Logger.info("[#{torrent.hash}] Media validation passed for #{length(video_files)} files")
         :ok
 
-      {:error, reason} ->
-        {:error, reason}
+      error ->
+        error
     end
   end
 
@@ -129,12 +155,13 @@ defmodule ProcessingQueue.Validators.MediaValidator do
     filename = get_filename(file)
     hash = torrent.hash
 
-    # Get the streaming link from Real-Debrid
-    case get_streaming_link(file, rd_id, torrent) do
+    # Get the streaming link from Real-Debrid with retry
+    case get_streaming_link_with_retry(file, rd_id, torrent) do
       {:ok, url, _filename} ->
         Logger.debug("[#{hash}] Got streaming URL for #{filename}")
 
-        case MediaValidator.validate_url(url, enabled: true, filename: filename) do
+        # Validate with retry (FFprobe can fail on network issues)
+        case validate_url_with_retry(url, filename, hash) do
           :ok ->
             Logger.debug("[#{hash}] Media validation passed: #{filename}")
             :ok
@@ -154,6 +181,36 @@ defmodule ProcessingQueue.Validators.MediaValidator do
 
         {:error, {:streaming_link_failed, filename, reason}}
     end
+  end
+
+  defp validate_url_with_retry(url, filename, hash) do
+    RetryPolicy.with_retries(
+      fn -> MediaValidator.validate_url(url, enabled: true, filename: filename) end,
+      max_retries: 3,
+      base_delay: 1_000,
+      max_delay: 5_000,
+      on_retry: fn attempt ->
+        Logger.info(
+          "[#{hash}] Retrying FFprobe validation for #{filename} (attempt #{attempt}/3)"
+        )
+      end
+    )
+  end
+
+  defp get_streaming_link_with_retry(file, rd_id, torrent) do
+    RetryPolicy.with_retries(
+      fn -> get_streaming_link(file, rd_id, torrent) end,
+      max_retries: 3,
+      base_delay: 1_000,
+      max_delay: 5_000,
+      on_retry: fn attempt ->
+        filename = get_filename(file)
+
+        Logger.info(
+          "[#{torrent.hash}] Retrying RD unrestrict link for #{filename} (attempt #{attempt}/3)"
+        )
+      end
+    )
   end
 
   defp get_streaming_link(file, rd_id, torrent) do
@@ -241,13 +298,6 @@ defmodule ProcessingQueue.Validators.MediaValidator do
   end
 
   defp find_link_for_file(_, _, _), do: {:error, :no_links_available}
-
-  defp get_filename_by_id(files, file_id) when is_list(files) do
-    file = Enum.find(files, fn f -> get_file_id(f) == file_id end)
-    if file, do: get_filename(file), else: nil
-  end
-
-  defp get_filename_by_id(_, _), do: nil
 
   defp check_not_sample_by_name(filename) do
     if MediaValidator.is_sample_by_name?(filename) do

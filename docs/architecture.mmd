@@ -435,19 +435,18 @@ flowchart TB
             S8C1 -- Yes --> S8C3
         end
         
-        subgraph S8_Validate["B. FFprobe Each File"]
+        subgraph S8_Validate["B. FFprobe Each File (Concurrent)"]
             direction LR
             S8V1["Get selected video files"]
-            S8V2["For each file:"]
-            S8V3["• Size >= min_size_bytes?"]
-            S8V4["• Filename not 'sample'?"]
-            S8V5["• Get RD streaming link"]
-            S8V6["• FFprobe.probe(stream_url)"]
-            S8V7["• Has video stream?"]
-            S8V8["• Has audio stream?"]
-            S8V9["• Duration >= 10min?"]
-            S8V10{"All files valid?"}
-            S8V11["Media validation passed"]
+            S8V2["Task.async_stream (max 8 concurrent files):"]
+            S8V3["• Filename not 'sample'?"]
+            S8V4["• Get RD streaming link<br/>  (retry 3x, 1-5s backoff)"]
+            S8V5["• FFprobe.probe(stream_url)<br/>  (retry 3x, 1-5s backoff)"]
+            S8V6["• Has video stream?"]
+            S8V7["• Has audio stream?"]
+            S8V8["• Duration >= 10min?"]
+            S8V9{"All files valid?"}
+            S8V10["Media validation passed"]
             
             S8V1 --> S8V2 --> S8V3 --> S8V4 --> S8V5 --> S8V6
             S8V6 --> S8V7 --> S8V8 --> S8V9 --> S8V10
@@ -458,8 +457,8 @@ flowchart TB
     end
     
     S8C2 --> State_ValidatePath
-    S8V10 -- No --> Fail_MediaInvalid["failure_type: :validation<br/>Notify Servarr (code 24)<br/>'Media validation failed'"] --> Terminal_Failed
-    S8V11 --> State_ValidatePath
+    S8V9 -- No --> Fail_MediaInvalid["failure_type: :validation<br/>Notify Servarr (code 24)<br/>'Media validation failed'"] --> Terminal_Failed
+    S8V10 --> State_ValidatePath
     
     %% ============================================================================
     %% STATE: VALIDATING_PATH
@@ -698,9 +697,9 @@ flowchart TB
             SC3 -- No --> SC4 --> SC1
         end
         
-        subgraph SC_Cleanup["B. Cleanup Expired"]
+        subgraph SC_Cleanup["B. Cleanup Expired (Concurrent)"]
             direction LR
-            SC5["Manager.cleanup_torrents"]
+            SC5["Manager.cleanup_torrents<br/>(Task.async_stream, 2x CPUs)"]
             SC6{"failure_type?"}
             SC7[":permanent<br/>→ Cleanup RD"]
             SC8[":validation<br/>→ Cleanup RD"]
@@ -751,6 +750,7 @@ flowchart TB
             MOD3["RDPoller"]
             MOD4["ServarrSync"]
             MOD5["RetryPolicy"]
+            MOD12["RDClientManager"]
         end
         
         subgraph MOD_Validate["Validation"]
@@ -786,7 +786,7 @@ flowchart TB
     class Terminal_Failed terminalFailed
     class Side_Remove,Side_Cleanup sideOp
     class Services,SVC1,SVC2,SVC3 service
-    class Modules,MOD_Parse,MOD_Network,MOD_Validate,MOD_Error,MOD1,MOD2,MOD3,MOD4,MOD5,MOD6,MOD7,MOD8,MOD9,MOD10,MOD11 module
+    class Modules,MOD_Parse,MOD_Network,MOD_Validate,MOD_Error,MOD1,MOD2,MOD3,MOD4,MOD5,MOD6,MOD7,MOD8,MOD9,MOD10,MOD11,MOD12 module
     class APIStart,APISend,ProdSuccess,ProdReject,End_Success,End_Failed,STATNotFound,STATNoCreds,STATReturn entryExit
     class Fail_Parse,Fail_Magnet,Fail_RDError,Fail_Dead,Fail_NoCreds,Fail_ServarrAPI,Fail_EmptyHistory,Fail_NotDL,Fail_CountMismatch,Fail_MediaInvalid errorNode
 
@@ -841,6 +841,16 @@ flowchart TB
 %%     - Prevents "Downloaded - Waiting to Import" status (not 100%)
 %%     - Prevents being hidden from Activity view (not 0%)
 %%     - Sonarr shows "Downloading" with minimal progress until validation complete
+%%   ✓ Concurrent batch operations for performance:
+%%     - Media validation: Task.async_stream (max 8 concurrent files, 120s timeout per file)
+%%     - Cleanup operations: Task.async_stream (2x CPUs, 30s timeout per check)
+%%   ✓ Retry logic for transient failures:
+%%     - FFprobe validation: 3 attempts, 1-5s exponential backoff
+%%     - RD unrestrict_link: 3 attempts, 1-5s exponential backoff
+%%   ✓ Shared RealDebrid client via RDClientManager:
+%%     - Single client reused across application (avoids rate limiter GenServer leaks)
+%%     - Automatically recreates client if token changes
+%%     - Rate limiter is per-token, so sharing is recommended approach
 %% 
 %% EXTERNAL DEPENDENCIES:
 %%   • Real-Debrid API - Torrent management, file selection, streaming
@@ -852,6 +862,7 @@ flowchart TB
 %%   • TorrentParser - Extract infohash from magnet/torrent
 %%   • FileSelector - Filter video/subtitle/metadata files
 %%   • RDPoller - Unified Real-Debrid polling strategies
+%%   • RDClientManager - Manages shared RealDebrid client (prevents resource leaks)
 %%   • ServarrSync - Servarr API interactions (history, refresh, notify)
 %%   • RetryPolicy - Exponential backoff for network operations
 %%   • ValidationPipeline - Orchestrate validation phases

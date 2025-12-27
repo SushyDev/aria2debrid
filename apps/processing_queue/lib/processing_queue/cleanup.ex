@@ -1,6 +1,6 @@
 defmodule ProcessingQueue.Cleanup do
   @moduledoc """
-  Automatic cleanup of failed torrents after retention period.
+  Automatic cleanup of failed torrents after retention period with concurrent processing.
 
   This module periodically checks for failed torrents and removes them from the queue
   after they've been in the failed state for the configured retention period (default: 5 minutes).
@@ -11,7 +11,7 @@ defmodule ProcessingQueue.Cleanup do
   - The `CanBeRemoved` flag is ONLY set to true for completed downloads (status="complete")
   - Failed downloads (status="error") have `CanBeRemoved=false`
   - Even with `RemoveFailedDownloads=true`, Sonarr will NOT remove failed aria2 downloads
-  - The `RemoveFailedDownloads` setting is effectively ignored for aria2!
+  - The `RemoveFailedDownloads` setting is effectively ignored for aria2 due to this limitation
 
   Sonarr's Failed Download Handler:
   1. Detects the failed download via aria2 status
@@ -40,7 +40,7 @@ defmodule ProcessingQueue.Cleanup do
     - Examples: file count mismatch, media validation failure
 
   - **Permanent failures** (`:permanent`) - DELETE RD resources
-    - No reason to keep resources for non-retryable errors
+    - Non-retryable errors, no reason to keep resources
     - Saves RD quota and storage
     - Examples: RD API errors, network timeouts, invalid magnets
 
@@ -67,6 +67,15 @@ defmodule ProcessingQueue.Cleanup do
   - Failed downloads: RD cleanup follows the same failure type rules as automatic cleanup
   - Completed downloads: RD resources are kept (user may want them available)
   - Processing downloads: RD resources are kept (user may want to investigate)
+
+  ## Concurrency
+
+  Cleanup operations are performed concurrently using `Task.async_stream/3` with:
+  - Max concurrency: 10 concurrent cleanup operations
+  - Timeout: 15 seconds per cleanup operation
+  - Failed tasks are killed on timeout
+
+  This provides faster cleanup for large batches of failed torrents.
 
   ## Configuration
 
@@ -115,10 +124,23 @@ defmodule ProcessingQueue.Cleanup do
 
     Logger.debug("Cleanup check: #{length(torrents)} total torrents, #{failed_count} failed")
 
+    # Identify torrents eligible for cleanup concurrently
     to_cleanup =
       torrents
-      |> Enum.filter(&Torrent.should_cleanup?/1)
-      |> Enum.map(& &1.hash)
+      |> Task.async_stream(
+        fn torrent ->
+          if Torrent.should_cleanup?(torrent), do: torrent.hash, else: nil
+        end,
+        max_concurrency: System.schedulers_online() * 2,
+        timeout: 30_000,
+        on_timeout: :kill_task,
+        ordered: false
+      )
+      |> Enum.reduce([], fn
+        {:ok, nil}, acc -> acc
+        {:ok, hash}, acc -> [hash | acc]
+        {:exit, _reason}, acc -> acc
+      end)
 
     if length(to_cleanup) > 0 do
       Logger.info(

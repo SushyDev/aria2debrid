@@ -19,6 +19,10 @@
 						pkgs.watchman
 						pkgs.inotify-tools
 						pkgs.ffmpeg-full
+						# Integration test dependencies (for scripts/integration_test.sh)
+						pkgs.curl
+						pkgs.jq
+						pkgs.docker
 					];
 
 					shellHook = ''

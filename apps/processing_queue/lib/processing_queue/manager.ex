@@ -19,14 +19,17 @@ defmodule ProcessingQueue.Manager do
     GenServer.start_link(__MODULE__, opts, name: __MODULE__)
   end
 
+  # Timeout for operations that may involve Real-Debrid API calls
+  @call_timeout 60_000
+
   @spec add_magnet(String.t(), keyword()) :: {:ok, String.t()} | {:error, term()}
   def add_magnet(magnet, opts \\ []) do
-    GenServer.call(__MODULE__, {:add_magnet, magnet, opts})
+    GenServer.call(__MODULE__, {:add_magnet, magnet, opts}, @call_timeout)
   end
 
   @spec add_torrent_file(binary(), keyword()) :: {:ok, String.t()} | {:error, term()}
   def add_torrent_file(torrent_data, opts \\ []) when is_binary(torrent_data) do
-    GenServer.call(__MODULE__, {:add_torrent_file, torrent_data, opts})
+    GenServer.call(__MODULE__, {:add_torrent_file, torrent_data, opts}, @call_timeout)
   end
 
   @spec get_torrent(String.t()) :: {:ok, Torrent.t()} | {:error, :not_found}
@@ -36,12 +39,12 @@ defmodule ProcessingQueue.Manager do
 
   @spec list_torrents() :: [Torrent.t()]
   def list_torrents do
-    GenServer.call(__MODULE__, :list_torrents)
+    GenServer.call(__MODULE__, :list_torrents, @call_timeout)
   end
 
   @spec remove_torrent(String.t()) :: :ok | {:error, term()}
   def remove_torrent(hash) do
-    GenServer.call(__MODULE__, {:remove_torrent, String.downcase(hash)})
+    GenServer.call(__MODULE__, {:remove_torrent, String.downcase(hash)}, @call_timeout)
   end
 
   @spec pause_torrent(String.t()) :: :ok | {:error, term()}
@@ -111,31 +114,6 @@ defmodule ProcessingQueue.Manager do
     end
   end
 
-  defp add_new_torrent(magnet, hash, opts, state) do
-    torrent = Torrent.new(hash, magnet)
-    torrent = apply_opts(torrent, opts)
-
-    Logger.debug("Adding torrent #{hash} to Real Debrid")
-    client = get_rd_client()
-
-    case RealDebrid.Api.AddMagnet.add(client, magnet) do
-      {:ok, response} ->
-        rd_id = response.id
-        torrent = %{torrent | rd_id: rd_id}
-        torrent = Torrent.transition(torrent, :waiting_metadata)
-
-        start_processor(torrent)
-
-        new_state = put_in(state.torrents[hash], torrent)
-        Logger.info("Added torrent #{hash} to processing queue with RD ID #{rd_id}")
-        {:reply, {:ok, hash}, new_state}
-
-      {:error, reason} ->
-        Logger.error("Failed to add torrent #{hash} to Real Debrid: #{inspect(reason)}")
-        {:reply, {:error, reason}, state}
-    end
-  end
-
   @impl true
   def handle_call({:add_torrent_file, torrent_data, opts}, _from, state) do
     case ProcessingQueue.TorrentParser.extract_infohash(torrent_data) do
@@ -173,33 +151,6 @@ defmodule ProcessingQueue.Manager do
 
       {:error, reason} ->
         Logger.error("Failed to extract infohash from torrent file: #{inspect(reason)}")
-        {:reply, {:error, reason}, state}
-    end
-  end
-
-  defp add_new_torrent_file(torrent_data, hash, opts, state) do
-    magnet = "magnet:?xt=urn:btih:#{hash}"
-    torrent = Torrent.new(hash, magnet)
-    torrent = apply_opts(torrent, opts)
-
-    Logger.debug("Adding torrent file #{hash} to Real Debrid")
-    client = get_rd_client()
-
-    case RealDebrid.Api.AddTorrent.add(client, torrent_data) do
-      {:ok, response} ->
-        rd_id = response.id
-        torrent = %{torrent | rd_id: rd_id}
-        torrent = Torrent.transition(torrent, :waiting_metadata)
-
-        start_processor(torrent)
-
-        new_state = put_in(state.torrents[hash], torrent)
-        Logger.info("Added torrent file #{hash} to processing queue with RD ID #{rd_id}")
-        {:reply, {:ok, hash}, new_state}
-
-      {:error, reason} ->
-        Logger.error("Failed to add torrent file #{hash} to Real Debrid: #{inspect(reason)}")
-
         {:reply, {:error, reason}, state}
     end
   end
@@ -334,6 +285,58 @@ defmodule ProcessingQueue.Manager do
 
   # Private functions
 
+  defp add_new_torrent(magnet, hash, opts, state) do
+    torrent = Torrent.new(hash, magnet)
+    torrent = apply_opts(torrent, opts)
+
+    Logger.debug("Adding torrent #{hash} to Real Debrid")
+    client = get_rd_client()
+
+    case RealDebrid.Api.AddMagnet.add(client, magnet) do
+      {:ok, response} ->
+        rd_id = response.id
+        torrent = %{torrent | rd_id: rd_id}
+        torrent = Torrent.transition(torrent, :waiting_metadata)
+
+        start_processor(torrent)
+
+        new_state = put_in(state.torrents[hash], torrent)
+        Logger.info("Added torrent #{hash} to processing queue with RD ID #{rd_id}")
+        {:reply, {:ok, hash}, new_state}
+
+      {:error, reason} ->
+        Logger.error("Failed to add torrent #{hash} to Real Debrid: #{inspect(reason)}")
+        {:reply, {:error, reason}, state}
+    end
+  end
+
+  defp add_new_torrent_file(torrent_data, hash, opts, state) do
+    magnet = "magnet:?xt=urn:btih:#{hash}"
+    torrent = Torrent.new(hash, magnet)
+    torrent = apply_opts(torrent, opts)
+
+    Logger.debug("Adding torrent file #{hash} to Real Debrid")
+    client = get_rd_client()
+
+    case RealDebrid.Api.AddTorrent.add(client, torrent_data) do
+      {:ok, response} ->
+        rd_id = response.id
+        torrent = %{torrent | rd_id: rd_id}
+        torrent = Torrent.transition(torrent, :waiting_metadata)
+
+        start_processor(torrent)
+
+        new_state = put_in(state.torrents[hash], torrent)
+        Logger.info("Added torrent file #{hash} to processing queue with RD ID #{rd_id}")
+        {:reply, {:ok, hash}, new_state}
+
+      {:error, reason} ->
+        Logger.error("Failed to add torrent file #{hash} to Real Debrid: #{inspect(reason)}")
+
+        {:reply, {:error, reason}, state}
+    end
+  end
+
   defp extract_hash(magnet) do
     case Regex.run(~r/btih:([a-fA-F0-9]{40})/i, magnet) do
       [_, hash] ->
@@ -404,14 +407,7 @@ defmodule ProcessingQueue.Manager do
   end
 
   defp get_rd_client do
-    token = Aria2Debrid.Config.real_debrid_token()
-    max_requests = Aria2Debrid.Config.requests_per_minute()
-    max_retries = Aria2Debrid.Config.max_retries()
-
-    RealDebrid.Client.new(token,
-      max_requests_per_minute: max_requests,
-      max_retries: max_retries
-    )
+    ProcessingQueue.RDClientManager.get_client()
   end
 
   defp unregister_gid(hash) do
